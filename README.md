@@ -34,7 +34,7 @@ cp .env.example .env
 
 2. Open the `.env` file and add your Azure API key:
 ```
-VITE_AZURE_ENDPOINT=https://isabe-mgocqkza-eastus2.cognitiveservices.azure.com/
+VITE_AZURE_ENDPOINT=your-actual-endpoint-here
 VITE_AZURE_API_KEY=your-actual-api-key-here
 VITE_AZURE_DEPLOYMENT=gpt-5.1-chat
 VITE_AZURE_API_VERSION=2024-12-01-preview
