@@ -40,7 +40,7 @@ VITE_AZURE_DEPLOYMENT=gpt-5.1-chat
 VITE_AZURE_API_VERSION=2024-12-01-preview
 ```
 
-3. Replace `your-actual-api-key-here` with your actual Azure API key
+3. Replace `your-actual-api-endpoint-here` and `your-actual-api-key-here` with your actual Azure API key
 
 4. Restart the development server for the changes to take effect
 
