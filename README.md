@@ -1,4 +1,4 @@
-# LLM Chat & Visualization
+# Person Perception
 
 A local web application with a chat interface for interacting with an LLM and a visualization panel that displays insights based on the responses.
 
