@@ -1,7 +1,10 @@
 import { useRef, useEffect } from 'react'
 import './VisualizationPanel.css'
 
-function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLoadingMentalModel, isLoadingAssumptions, useOldModel, onToggleModel }) {
+const INLINE_MENTAL_MODEL_TYPES = ['support', 'induct', 'structured']
+
+function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLoadingMentalModel, isLoadingAssumptions, useOldModel, mentalModelType }) {
+  const showJsonOnly = INLINE_MENTAL_MODEL_TYPES.includes(mentalModelType)
   const baselineMentalModelRef = useRef(null)
 
   // Track baseline mental model (value before current update cycle started)
@@ -322,23 +325,29 @@ function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLo
   return (
     <div className="visualization-panel">
       <div className="visualization-header">
-        <h1>person perception</h1>
-        <div className="model-toggle">
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={useOldModel}
-              onChange={onToggleModel}
-              className="toggle-input"
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <span className="toggle-text">Previous Model</span>
-        </div>
+        <h1>{showJsonOnly ? 'Mental model' : 'person perception'}</h1>
       </div>
       
       <div className="visualization-content">
-        {!mentalModel && (!useOldModel || (!assumptions && !isLoadingAssumptions)) && !isLoadingMentalModel ? (
+        {showJsonOnly ? (
+          !mentalModel && !isLoadingMentalModel ? (
+            <div className="empty-visualization">
+              <p>Mental model will appear here after the first response</p>
+            </div>
+          ) : (
+            <div className="assumptions-display">
+              {(mentalModel || isLoadingMentalModel) && (
+                <div className="mental-model-display">
+                  <h3>
+                    {mentalModelType}
+                    {isLoadingMentalModel && <span className="loading-indicator">⟳</span>}
+                  </h3>
+                  <pre className="mental-model-json"><code>{JSON.stringify(mentalModel || {}, null, 2)}</code></pre>
+                </div>
+              )}
+            </div>
+          )
+        ) : !mentalModel && (!useOldModel || (!assumptions && !isLoadingAssumptions)) && !isLoadingMentalModel ? (
           <div className="empty-visualization">
             <p>Mental model{useOldModel ? ' and assumptions' : ''} will appear here after the first response</p>
           </div>

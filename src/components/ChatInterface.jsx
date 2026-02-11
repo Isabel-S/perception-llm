@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import './ChatInterface.css'
 
-function ChatInterface({ messages, onSendMessage, isLoading }) {
+function ChatInterface({ messages, onSendMessage, isLoading, disableInput = false, title = null }) {
   const [input, setInput] = useState('')
   const messagesEndRef = useRef(null)
 
@@ -16,18 +16,30 @@ function ChatInterface({ messages, onSendMessage, isLoading }) {
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    if (input.trim() && !isLoading) {
+    if (input.trim() && !isLoading && !disableInput) {
       onSendMessage(input.trim())
       setInput('')
     }
   }
 
+  const inputDisabled = isLoading || disableInput
+
   return (
     <div className="chat-interface">
+      {title && (
+        <div className="chat-title" style={{ padding: '6px 10px', background: '#e8e8e8', fontSize: '13px', fontWeight: 600 }}>
+          {title}
+        </div>
+      )}
       <div className="chat-messages">
-        {messages.length === 0 && (
+        {messages.length === 0 && !title && (
           <div className="empty-state">
             <p>Start a conversation with the LLM</p>
+          </div>
+        )}
+        {messages.length === 0 && title && (
+          <div className="empty-state">
+            <p>Eval running… conversation will appear here.</p>
           </div>
         )}
         
@@ -63,13 +75,13 @@ function ChatInterface({ messages, onSendMessage, isLoading }) {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Type your message..."
-          disabled={isLoading}
+          placeholder={disableInput ? 'Eval running…' : 'Type your message...'}
+          disabled={inputDisabled}
           className="chat-input"
         />
         <button 
           type="submit" 
-          disabled={!input.trim() || isLoading}
+          disabled={!input.trim() || inputDisabled}
           className="send-button"
         >
           Send
