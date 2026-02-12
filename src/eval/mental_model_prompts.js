@@ -9,10 +9,10 @@ function buildHistoryBlock(historyStr) {
 }
 
 /**
- * Build full prompt for support / induct / structured.
+ * Build full prompt for support / induct / structured / types_support.
  * historyStr: conversation so far (plain text).
  * newUserText: User A's current message.
- * modelType: 'support' | 'induct' | 'structured'
+ * modelType: 'support' | 'induct' | 'structured' | 'types_support'
  */
 export function buildPromptWithHistory(historyStr, newUserText, modelType) {
   const historyBlock = buildHistoryBlock(historyStr)
@@ -130,10 +130,74 @@ Then, on a new line, write your actual reply to User A under the heading:
 
 RESPONSE:`
 
+const SUFFIX_TYPES_SUPPORT = `First, output your mental model of User A. Estimate structured beliefs about the extent to which User A is seeking different types of support:
+
+1. **Emotional Support** - Seeking opportunities for confiding, sympathetic listening, or caring behaviors:
+   - Confiding/listening: seeking empathetic understanding or wanting someone to listen to private feelings or problems
+   - Affection: seeking expressions of love, care, or emotional closeness
+   - Esteem support: seeking validation of self-worth, acceptance despite difficulties
+   - Being there: seeking unconditional availability or presence
+   - Comforting touch: seeking physical comfort or affection 
+
+2. **Social Contact and Companionship** - Seeking positive social interaction:
+   - Companionship: wanting to spend time with others, do activities together
+   - Positive interaction: seeking to joke, talk about interests, engage in diversionary activities
+   - Shared activities: wanting to do fun things with others
+
+3. **Belonging Support** - Seeking connection to a group or community:
+   - Social integration: wanting to feel part of a group with common interests
+   - Group inclusion: seeking comfort, security, or identity through group membership
+   - Sense of belonging: wanting to feel included and connected
+
+4. **Information and Guidance Support** - Seeking knowledge, advice, or problem-solving help:
+   - Advice/guidance: seeking solutions, feedback, or direction
+   - Information: seeking facts, explanations, or understanding of situations
+   - Cognitive guidance: seeking help in defining or coping with problems
+
+5. **Tangible Support** - Seeking practical or instrumental assistance:
+   - Material aid: seeking financial help, resources, or physical objects
+   - Practical assistance: seeking help with tasks, chores, or concrete actions
+   - Reliable alliance: seeking assurance that others will provide tangible help
+
+Treat these as *probabilistic beliefs* that may co-exist. These dimensions are independent and do NOT need to sum to 1. Each score should be between 0 and 1.
+
+Then output ONLY a valid JSON object in the following structure:
+{
+  "mental_model": {
+    "support_seeking": {
+      "emotional_support": {
+        "score": 0.0,
+        "explanation": ""
+      },
+      "social_companionship": {
+        "score": 0.0,
+        "explanation": ""
+      },
+      "belonging_support": {
+        "score": 0.0,
+        "explanation": ""
+      },
+      "information_guidance": {
+        "score": 0.0,
+        "explanation": ""
+      },
+      "tangible_support": {
+        "score": 0.0,
+        "explanation": ""
+      }
+    }
+  }
+}
+
+Then, on a new line, write your actual reply to User A under the heading:
+
+RESPONSE:`
+
 const SUFFIX_BY_MODEL = {
   support: SUFFIX_SUPPORT,
   induct: SUFFIX_INDUCT,
   structured: SUFFIX_STRUCTURED,
+  types_support: SUFFIX_TYPES_SUPPORT,
 }
 
 /** Strip markdown code fences from JSON string if present */
@@ -188,4 +252,4 @@ export function parseSingleCallResponse(content) {
   return { mentalModel: mentalModel || {}, response: responseText }
 }
 
-export const INLINE_MENTAL_MODEL_TYPES = ['support', 'induct', 'structured']
+export const INLINE_MENTAL_MODEL_TYPES = ['support', 'induct', 'structured', 'types_support']

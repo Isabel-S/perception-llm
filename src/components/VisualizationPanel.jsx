@@ -1,7 +1,7 @@
 import { useRef, useEffect } from 'react'
 import './VisualizationPanel.css'
 
-const INLINE_MENTAL_MODEL_TYPES = ['support', 'induct', 'structured']
+const INLINE_MENTAL_MODEL_TYPES = ['support', 'induct', 'structured', 'types_support']
 
 function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLoadingMentalModel, isLoadingAssumptions, useOldModel, mentalModelType }) {
   const showJsonOnly = INLINE_MENTAL_MODEL_TYPES.includes(mentalModelType)

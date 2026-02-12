@@ -47,7 +47,7 @@ function App() {
         content: msg.content
       }))
 
-      const isInlineMentalModel = ['support', 'induct', 'structured'].includes(mentalModelType)
+      const isInlineMentalModel = ['support', 'induct', 'structured', 'types_support'].includes(mentalModelType)
       setIsLoadingMentalModel(true)
       const turnId = `t${String(turnIndex).padStart(3, '0')}`
       let mmData = null
@@ -246,6 +246,7 @@ function App() {
             <option value="support">Support</option>
             <option value="induct">Induct</option>
             <option value="structured">Structured</option>
+            <option value="types_support">Types support</option>
           </select>
         </label>
         <button type="button" onClick={runEvalTest} disabled={evalRunning}>
