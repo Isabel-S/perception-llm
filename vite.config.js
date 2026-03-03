@@ -41,6 +41,40 @@ function buildSingleCallManifest() {
   return { runs }
 }
 
+/** Copy data/single_call into dist at build time (excluding archive) so the public site can serve runs */
+function copySingleCallDataToDist() {
+  return {
+    name: 'copy-single-call-data',
+    closeBundle() {
+      const outDir = path.join(process.cwd(), 'dist', 'data', 'single_call')
+      if (!fs.existsSync(SINGLE_CALL_DIR)) {
+        fs.mkdirSync(outDir, { recursive: true })
+        fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify({ runs: [] }))
+        return
+      }
+      function copyRecursive(src, dest) {
+        const entries = fs.readdirSync(src, { withFileTypes: true })
+        for (const e of entries) {
+          const srcPath = path.join(src, e.name)
+          const destPath = path.join(dest, e.name)
+          if (e.name === 'archive') continue
+          if (e.isDirectory()) {
+            fs.mkdirSync(destPath, { recursive: true })
+            copyRecursive(srcPath, destPath)
+          } else if (e.isFile() && e.name.endsWith('.json')) {
+            fs.mkdirSync(path.dirname(destPath), { recursive: true })
+            fs.copyFileSync(srcPath, destPath)
+          }
+        }
+      }
+      fs.mkdirSync(outDir, { recursive: true })
+      copyRecursive(SINGLE_CALL_DIR, outDir)
+      const manifest = buildSingleCallManifest()
+      fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest))
+    },
+  }
+}
+
 /** Serve ./data at /data so the app can fetch conversation JSONs */
 function serveData() {
   return {
@@ -87,5 +121,5 @@ function serveData() {
 export default defineConfig({
   // GitHub Pages: set VITE_BASE_URL=/<repo-name>/ in the deploy workflow
   base: process.env.VITE_BASE_URL || '/',
-  plugins: [react(), serveData()],
+  plugins: [react(), serveData(), copySingleCallDataToDist()],
 })

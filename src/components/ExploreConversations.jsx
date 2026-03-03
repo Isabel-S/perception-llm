@@ -1,7 +1,14 @@
 import { useState, useEffect } from 'react'
 import './ExploreConversations.css'
 
-const MANIFEST_URL = '/data/single_call/manifest.json'
+function getDataBaseUrl() {
+  const base = (typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL) || '/'
+  return base.endsWith('/') ? base : base + '/'
+}
+
+const getManifestUrl = () => getDataBaseUrl() + 'data/single_call/manifest.json'
+const getConversationUrl = (runId, category, promptId) =>
+  getDataBaseUrl() + `data/single_call/${runId}/${category}/${promptId}.json`
 
 function formatCategoryLabel(cat) {
   return cat.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
@@ -65,9 +72,9 @@ export default function ExploreConversations({ onClose }) {
   useEffect(() => {
     setManifestLoading(true)
     setManifestError(null)
-    fetch(MANIFEST_URL)
+    fetch(getManifestUrl())
       .then(r => {
-        if (!r.ok) throw new Error(r.status === 404 ? 'Manifest not found. Run: node scripts/generate-spiral-manifest.js' : r.statusText)
+        if (!r.ok) throw new Error(r.status === 404 ? 'No run data on this site. Explore shows saved eval runs from a local install.' : r.statusText)
         return r.json()
       })
       .then(setManifest)
@@ -86,7 +93,7 @@ export default function ExploreConversations({ onClose }) {
     }
     setLoading(true)
     setError(null)
-    const url = `/data/single_call/${selectedRunId}/${selectedCategory}/${selectedPromptId}.json`
+    const url = getConversationUrl(selectedRunId, selectedCategory, selectedPromptId)
     fetch(url)
       .then(r => {
         if (!r.ok) throw new Error(r.status === 404 ? 'File not found' : r.statusText)
@@ -129,6 +136,10 @@ export default function ExploreConversations({ onClose }) {
       {manifest && !manifestLoading && (
         <>
           <div className="explore-body">
+          {runs.length === 0 ? (
+            <p className="explore-empty-message">No run data on this site. Explore shows saved Spiral-Bench eval runs—run evals locally to see data here, or use the Chat tab to try the app.</p>
+          ) : (
+          <>
           <div className="explore-runs-section">
             <h3 className="explore-runs-title">Runs</h3>
             <p className="explore-runs-desc">Click <strong>Chatlog</strong> to open conversations for a run.</p>
@@ -256,6 +267,8 @@ export default function ExploreConversations({ onClose }) {
             <p className="explore-hint">
               Click <strong>Chatlog</strong> next to a run above to browse Spiral-Bench conversations.
             </p>
+          )}
+          </>
           )}
           </div>
         </>
