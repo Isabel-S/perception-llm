@@ -808,12 +808,43 @@ async function chatCompletionGemini(messages) {
 }
 
 /**
+ * Get a Vertex AI access token using service account credentials from keyPath.
+ * Uses JWT client with explicit credentials to avoid invalid_scope errors that can
+ * occur with GoogleAuth.getClient() (e.g. when the key has API restrictions).
+ */
+async function getVertexAccessToken(keyPath) {
+  const { readFileSync } = await import('fs')
+  const { JWT } = await import('google-auth-library')
+  let keyContent
+  try {
+    keyContent = readFileSync(keyPath, 'utf8')
+  } catch (e) {
+    throw new Error(`Failed to read credentials from ${keyPath}: ${e.message}`)
+  }
+  let key
+  try {
+    key = JSON.parse(keyContent)
+  } catch (e) {
+    throw new Error(`Invalid JSON in ${keyPath}: ${e.message}`)
+  }
+  if (!key.client_email || !key.private_key) {
+    throw new Error(`${keyPath} must contain client_email and private_key (service account JSON)`)
+  }
+  const client = new JWT({
+    email: key.client_email,
+    key: key.private_key,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  })
+  const res = await client.getAccessToken()
+  return res?.token ?? null
+}
+
+/**
  * Gemini via Vertex AI (Node only). Uses GOOGLE_APPLICATION_CREDENTIALS path to service-account JSON.
  * Project ID from VITE_GEMINI_PROJECT_ID / GEMINI_PROJECT_ID or from the JSON file.
  */
 async function chatCompletionGeminiVertex(messages) {
   const { readFileSync } = await import('fs')
-  const { GoogleAuth } = await import('google-auth-library')
   const keyPath = GOOGLE_APPLICATION_CREDENTIALS
   if (!keyPath) {
     throw new Error('Gemini Vertex: set GOOGLE_APPLICATION_CREDENTIALS=path/to/service_account.json in .env')
@@ -831,14 +862,8 @@ async function chatCompletionGeminiVertex(messages) {
   }
   if (!projectId) throw new Error('Gemini Vertex: set VITE_GEMINI_PROJECT_ID in .env or ensure service account JSON has project_id')
 
-  // Match Python: scope https://www.googleapis.com/auth/cloud-platform
-  const auth = new GoogleAuth({
-    keyFilename: keyPath,
-    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-  })
-  const client = await auth.getClient()
-  const token = await client.getAccessToken()
-  if (!token.token) throw new Error('Failed to get Vertex AI access token')
+  const token = await getVertexAccessToken(keyPath)
+  if (!token) throw new Error('Failed to get Vertex AI access token')
 
   let systemInstruction = ''
   const chatMessages = []
@@ -865,7 +890,7 @@ async function chatCompletionGeminiVertex(messages) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token.token}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(body),
   })
@@ -891,7 +916,6 @@ async function chatCompletionGeminiVertex(messages) {
  */
 async function chatCompletionLlamaVertex(messages) {
   const { readFileSync } = await import('fs')
-  const { GoogleAuth } = await import('google-auth-library')
   const keyPath = GOOGLE_APPLICATION_CREDENTIALS
   if (!keyPath) {
     throw new Error('Llama Vertex: set GOOGLE_APPLICATION_CREDENTIALS=path/to/service_account.json in .env')
@@ -909,13 +933,8 @@ async function chatCompletionLlamaVertex(messages) {
   }
   if (!projectId) throw new Error('Llama Vertex: set LLAMA_PROJECT_ID or VITE_LLAMA_PROJECT_ID in .env')
 
-  const auth = new GoogleAuth({
-    keyFilename: keyPath,
-    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-  })
-  const client = await auth.getClient()
-  const token = await client.getAccessToken()
-  if (!token.token) throw new Error('Failed to get Vertex AI access token for Llama')
+  const token = await getVertexAccessToken(keyPath)
+  if (!token) throw new Error('Failed to get Vertex AI access token for Llama')
 
   // Vertex OpenAPI chat/completions expects OpenAI-style messages and returns choices[0].message.content
   const payload = {
@@ -930,7 +949,7 @@ async function chatCompletionLlamaVertex(messages) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token.token}`,
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(payload),
   })

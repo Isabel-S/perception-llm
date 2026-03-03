@@ -3,7 +3,105 @@ import './VisualizationPanel.css'
 
 const INLINE_MENTAL_MODEL_TYPES = ['support', 'induct', 'structured', 'types_support']
 
-function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLoadingMentalModel, isLoadingAssumptions, useOldModel, mentalModelType }) {
+const INDUCT_SERIES = [
+  { key: 'validation_seeking', label: 'Validation seeking', color: '#2d5016' },
+  { key: 'user_rightness', label: 'User rightness', color: '#1565c0' },
+  { key: 'user_information_advantage', label: 'User info advantage', color: '#6a1b9a' },
+  { key: 'objectivity_seeking', label: 'Objectivity seeking', color: '#c62828' },
+]
+
+const SUPPORT_SERIES = [
+  { key: 'emotional_support', label: 'Emotional support', color: '#2d5016' },
+  { key: 'social_companionship', label: 'Social & companionship', color: '#1565c0' },
+  { key: 'belonging_support', label: 'Belonging support', color: '#6a1b9a' },
+  { key: 'information_guidance', label: 'Information & guidance', color: '#c62828' },
+  { key: 'tangible_support', label: 'Tangible support', color: '#e65100' },
+]
+
+function ScoresAcrossTurnsChart({ mentalModelsByTurn, modelType }) {
+  const seriesConfig = modelType === 'induct' ? INDUCT_SERIES : modelType === 'types_support' ? SUPPORT_SERIES : []
+  if (!seriesConfig.length || !mentalModelsByTurn?.length) return null
+
+  const numTurns = mentalModelsByTurn.length
+  const getScores = (mm) => {
+    const inner = mm?.mental_model ?? mm
+    if (modelType === 'induct') {
+      const b = inner?.beliefs ?? {}
+      return seriesConfig.map(s => (typeof b[s.key]?.score === 'number' ? b[s.key].score : null))
+    }
+    const s = inner?.support_seeking ?? {}
+    return seriesConfig.map(spec => (typeof s[spec.key]?.score === 'number' ? s[spec.key].score : null))
+  }
+
+  const series = seriesConfig.map((spec, idx) => ({
+    ...spec,
+    values: mentalModelsByTurn.map(mm => getScores(mm)[idx]),
+  }))
+
+  const width = 400
+  const height = 220
+  const padding = { left: 44, right: 12, top: 12, bottom: 32 }
+  const innerWidth = width - padding.left - padding.right
+  const innerHeight = height - padding.top - padding.bottom
+
+  const xScale = (i) => padding.left + (numTurns <= 1 ? 0 : (i / Math.max(1, numTurns - 1)) * innerWidth)
+  const yScale = (v) => padding.top + innerHeight - (v != null && v >= 0 && v <= 1 ? v * innerHeight : innerHeight / 2)
+
+  const polylinePath = (values) => {
+    const pts = values.map((v, i) => (v != null ? [xScale(i), yScale(v)] : null))
+    const valid = pts.filter(Boolean)
+    if (valid.length < 2) return valid.length ? `M ${valid[0][0]} ${valid[0][1]}` : ''
+    return 'M ' + valid.map(([x, y]) => `${x} ${y}`).join(' L ')
+  }
+
+  return (
+    <div className="scores-across-turns-chart">
+      <h4>Scores across turns</h4>
+      <svg viewBox={`0 0 ${width} ${height}`} className="scores-chart-svg" preserveAspectRatio="xMidYMid meet">
+        {/* Y grid & axis */}
+        {[0, 0.25, 0.5, 0.75, 1].map((v, i) => (
+          <g key={i}>
+            <line x1={padding.left} y1={yScale(v)} x2={padding.left + innerWidth} y2={yScale(v)} className="chart-grid" />
+            <text x={padding.left - 6} y={yScale(v) + 4} className="chart-axis-label" textAnchor="end">{v}</text>
+          </g>
+        ))}
+        {/* X axis labels */}
+        {numTurns <= 8
+          ? Array.from({ length: numTurns }, (_, i) => (
+              <text key={i} x={xScale(i)} y={height - 8} className="chart-axis-label" textAnchor="middle">T{i + 1}</text>
+            ))
+          : Array.from({ length: 5 }, (_, i) => {
+              const idx = i === 4 ? numTurns - 1 : Math.round((i / 4) * (numTurns - 1))
+              return (
+                <text key={i} x={xScale(idx)} y={height - 8} className="chart-axis-label" textAnchor="middle">T{idx + 1}</text>
+              )
+            })}
+        {/* Lines */}
+        {series.map((s, i) => (
+          <path key={s.key} d={polylinePath(s.values)} fill="none" stroke={s.color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="chart-line" />
+        ))}
+        {/* Dots at each point */}
+        {series.map((s) =>
+          s.values.map((v, turnIdx) =>
+            v != null && v >= 0 && v <= 1 ? (
+              <circle key={`${s.key}-${turnIdx}`} cx={xScale(turnIdx)} cy={yScale(v)} r={3} fill={s.color} className="chart-dot" />
+            ) : null
+          )
+        )}
+      </svg>
+      <div className="scores-chart-legend">
+        {series.map(s => (
+          <span key={s.key} className="scores-chart-legend-item">
+            <span className="scores-chart-legend-dot" style={{ background: s.color }} />
+            {s.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, mentalModelsByTurn = [], isLoadingMentalModel, isLoadingAssumptions, useOldModel, mentalModelType }) {
   const showJsonOnly = INLINE_MENTAL_MODEL_TYPES.includes(mentalModelType)
   const baselineMentalModelRef = useRef(null)
 
@@ -79,6 +177,117 @@ function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLo
       return value.toFixed(0)
     }
     return String(value || 'N/A')
+  }
+
+  const renderInductModel = () => {
+    if (!mentalModel) return <p className="no-assumptions">Loading mental model...</p>
+    const mm = mentalModel.mental_model ?? mentalModel
+    const beliefs = mm?.beliefs ?? {}
+    const beliefKeys = [
+      { key: 'validation_seeking', label: 'Validation seeking' },
+      { key: 'user_rightness', label: 'User rightness' },
+      { key: 'user_information_advantage', label: 'User information advantage' },
+      { key: 'objectivity_seeking', label: 'Objectivity seeking' },
+    ]
+    return (
+      <div className="new-model-display">
+        <div className="model-section">
+          <h4>Beliefs</h4>
+          <div className="model-subsection">
+            {beliefKeys.map(({ key, label }) => {
+              const item = beliefs[key]
+              if (!item) return null
+              const score = typeof item.score === 'number' ? item.score : null
+              const path = `mental_model.beliefs.${key}.score`
+              return (
+                <div key={key} className="mental-model-item">
+                  <span className="mental-model-label">{label}:</span>
+                  <span className="mental-model-value">
+                    {score != null ? formatValue(score, true) : 'N/A'}
+                    {getChangeIndicator(path, score)}
+                  </span>
+                  {item.explanation && (
+                    <div className="mental-model-explanation">{item.explanation}</div>
+                  )}
+                </div>
+              )
+            })}
+            {beliefKeys.every(({ key }) => !beliefs[key]) && (
+              <p className="no-data">No beliefs yet</p>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderStructuredModel = () => {
+    if (!mentalModel) return <p className="no-assumptions">Loading mental model...</p>
+    const models = mentalModel.mental_models ?? (Array.isArray(mentalModel) ? mentalModel : [])
+    return (
+      <div className="new-model-display">
+        <div className="model-section">
+          <h4>Top mental models</h4>
+          <div className="model-subsection structured-models-list">
+            {models.length === 0 && <p className="no-data">No models inferred yet</p>}
+            {models.map((m, idx) => (
+              <div key={idx} className="structured-model-card">
+                <div className="structured-model-header">
+                  <span className="structured-model-name">{m.model_name || '—'}</span>
+                  <span className="structured-model-probability">
+                    {typeof m.probability === 'number' ? `${(m.probability * 100).toFixed(0)}%` : '—'}
+                  </span>
+                </div>
+                <div className="structured-model-description">{m.description || '—'}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderSupportModel = () => {
+    if (!mentalModel) return <p className="no-assumptions">Loading mental model...</p>
+    const mm = mentalModel.mental_model ?? mentalModel
+    const supportSeeking = mm?.support_seeking ?? {}
+    const supportKeys = [
+      { key: 'emotional_support', label: 'Emotional support' },
+      { key: 'social_companionship', label: 'Social & companionship' },
+      { key: 'belonging_support', label: 'Belonging support' },
+      { key: 'information_guidance', label: 'Information & guidance' },
+      { key: 'tangible_support', label: 'Tangible support' },
+    ]
+    return (
+      <div className="new-model-display">
+        <div className="model-section">
+          <h4>Support seeking</h4>
+          <div className="model-subsection">
+            {supportKeys.map(({ key, label }) => {
+              const item = supportSeeking[key]
+              if (!item) return null
+              const score = typeof item.score === 'number' ? item.score : null
+              const path = `mental_model.support_seeking.${key}.score`
+              return (
+                <div key={key} className="mental-model-item">
+                  <span className="mental-model-label">{label}:</span>
+                  <span className="mental-model-value">
+                    {score != null ? formatValue(score, true) : 'N/A'}
+                    {getChangeIndicator(path, score)}
+                  </span>
+                  {item.explanation && (
+                    <div className="mental-model-explanation">{item.explanation}</div>
+                  )}
+                </div>
+              )
+            })}
+            {supportKeys.every(({ key }) => !supportSeeking[key]) && (
+              <p className="no-data">No support-seeking scores yet</p>
+            )}
+          </div>
+        </div>
+      </div>
+    )
   }
 
   const renderOldModel = () => {
@@ -325,7 +534,7 @@ function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLo
   return (
     <div className="visualization-panel">
       <div className="visualization-header">
-        <h1>{showJsonOnly ? 'Mental model' : 'person perception'}</h1>
+        <h1>Mental model</h1>
       </div>
       
       <div className="visualization-content">
@@ -333,6 +542,38 @@ function VisualizationPanel({ assumptions, assumptionsHistory, mentalModel, isLo
           !mentalModel && !isLoadingMentalModel ? (
             <div className="empty-visualization">
               <p>Mental model will appear here after the first response</p>
+            </div>
+          ) : mentalModelType === 'induct' ? (
+            <div className="assumptions-display">
+              <div className="mental-model-display">
+                <h3>
+                  Induct
+                  {isLoadingMentalModel && <span className="loading-indicator">⟳</span>}
+                </h3>
+                {renderInductModel()}
+                <ScoresAcrossTurnsChart mentalModelsByTurn={mentalModelsByTurn} modelType="induct" />
+              </div>
+            </div>
+          ) : mentalModelType === 'types_support' ? (
+            <div className="assumptions-display">
+              <div className="mental-model-display">
+                <h3>
+                  Support
+                  {isLoadingMentalModel && <span className="loading-indicator">⟳</span>}
+                </h3>
+                {renderSupportModel()}
+                <ScoresAcrossTurnsChart mentalModelsByTurn={mentalModelsByTurn} modelType="types_support" />
+              </div>
+            </div>
+          ) : mentalModelType === 'structured' ? (
+            <div className="assumptions-display">
+              <div className="mental-model-display">
+                <h3>
+                  Structured
+                  {isLoadingMentalModel && <span className="loading-indicator">⟳</span>}
+                </h3>
+                {renderStructuredModel()}
+              </div>
             </div>
           ) : (
             <div className="assumptions-display">

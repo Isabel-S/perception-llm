@@ -1,52 +1,92 @@
 import { useState, useEffect } from 'react'
-import { SCENARIOS } from '../eval/scenarios.js'
 import './ExploreConversations.css'
 
-const DATA_MODEL_OPTIONS = [
-  { id: 'induct', label: 'Induct' },
-  { id: 'structured', label: 'Structured' },
-  { id: 'support', label: 'Support' },
-  { id: 'support_types', label: 'Support types' },
-]
-
-const CATEGORIES = [...new Set(SCENARIOS.map(s => s.category))].sort()
-
-function getScenariosByCategory() {
-  const byCat = {}
-  for (const s of SCENARIOS) {
-    if (!byCat[s.category]) byCat[s.category] = []
-    byCat[s.category].push(s)
-  }
-  return byCat
-}
-
-const SCENARIOS_BY_CATEGORY = getScenariosByCategory()
+const MANIFEST_URL = '/data/single_call/manifest.json'
 
 function formatCategoryLabel(cat) {
   return cat.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 }
 
+/** Turn folder name (e.g. run_gemini_1_prior, run_gpt-4o_2_prior_seed_42) into a readable run label for the UI. */
+function formatRunDisplayLabel(run) {
+  const modelLabel = run.mentalModel === 'types_support' ? 'Support' : run.mentalModel === 'induct' ? 'Induct' : (run.mentalModel || '').replace(/_/g, ' ')
+  let name = (run.runFolder || run.id?.split('/')[1] || '')
+  if (!name) return run.label || run.id || 'Run'
+
+  let priorSuffix = ''
+  let seedSuffix = ''
+
+  if (name.endsWith('_prior')) {
+    priorSuffix = ' (prior)'
+    name = name.slice(0, -6)
+  }
+  const seedMatch = name.match(/_seed_(\d+)$/)
+  if (seedMatch) {
+    seedSuffix = ` (seed ${seedMatch[1]})`
+    name = name.slice(0, -seedMatch[0].length)
+  }
+  if (name.endsWith('_prior')) {
+    priorSuffix = ' (prior)'
+    name = name.slice(0, -6)
+  }
+
+  const runMatch = name.match(/^run_(.+)_(\d+)$/)
+  if (runMatch) {
+    const api = runMatch[1]
+    const apiNorm = api.toLowerCase().replace(/-/g, '')
+    const apiLabel = apiNorm === 'gpt4o' ? 'GPT-4o' : api.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    const num = runMatch[2]
+    return `${modelLabel} · ${apiLabel} run ${num}${priorSuffix}${seedSuffix}`
+  }
+
+  return modelLabel ? `${modelLabel} · ${name}` : (run.label || name)
+}
+
 export default function ExploreConversations({ onClose }) {
-  const [selectedModel, setSelectedModel] = useState(null)
+  const [manifest, setManifest] = useState(null)
+  const [manifestLoading, setManifestLoading] = useState(true)
+  const [manifestError, setManifestError] = useState(null)
+
+  const [selectedRunId, setSelectedRunId] = useState('')
   const [selectedCategory, setSelectedCategory] = useState('')
   const [selectedPromptId, setSelectedPromptId] = useState('')
+
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  const scenariosInCategory = selectedCategory ? (SCENARIOS_BY_CATEGORY[selectedCategory] || []) : []
-  const promptForScenario = selectedCategory && selectedPromptId
-    ? SCENARIOS.find(s => s.category === selectedCategory && s.prompt_id === selectedPromptId)
-    : null
+  const runs = manifest?.runs ?? []
+  const selectedRun = runs.find(r => r.id === selectedRunId)
+  const categories = selectedRun ? Object.keys(selectedRun.categories).sort() : []
+  const promptIds = selectedRun && selectedCategory
+    ? (selectedRun.categories[selectedCategory] ?? [])
+    : []
 
   useEffect(() => {
-    if (!selectedModel || !selectedCategory || !selectedPromptId) {
+    setManifestLoading(true)
+    setManifestError(null)
+    fetch(MANIFEST_URL)
+      .then(r => {
+        if (!r.ok) throw new Error(r.status === 404 ? 'Manifest not found. Run: node scripts/generate-spiral-manifest.js' : r.statusText)
+        return r.json()
+      })
+      .then(setManifest)
+      .catch(e => {
+        setManifestError(e.message)
+        setManifest(null)
+      })
+      .finally(() => setManifestLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (!selectedRunId || !selectedCategory || !selectedPromptId) {
       setData(null)
+      setError(null)
       return
     }
     setLoading(true)
     setError(null)
-    const url = `/data/${selectedModel}/${selectedCategory}/${selectedPromptId}.json`
+    const url = `/data/single_call/${selectedRunId}/${selectedCategory}/${selectedPromptId}.json`
     fetch(url)
       .then(r => {
         if (!r.ok) throw new Error(r.status === 404 ? 'File not found' : r.statusText)
@@ -58,122 +98,167 @@ export default function ExploreConversations({ onClose }) {
         setData(null)
       })
       .finally(() => setLoading(false))
-  }, [selectedModel, selectedCategory, selectedPromptId])
+  }, [selectedRunId, selectedCategory, selectedPromptId])
+
+  const resetAfterRun = (runId) => {
+    setSelectedRunId(runId)
+    setSelectedCategory('')
+    setSelectedPromptId('')
+    setData(null)
+  }
+
+  const resetAfterCategory = (cat) => {
+    setSelectedCategory(cat)
+    setSelectedPromptId('')
+    setData(null)
+  }
 
   return (
     <div className="explore-conversations">
       <div className="explore-header">
-        <h2 className="explore-title">Explore conversations</h2>
-        <button type="button" className="explore-close" onClick={onClose} aria-label="Close">
-          ×
-        </button>
+        <h2 className="explore-title">Explore Spiral-Bench conversations</h2>
       </div>
 
-      <div className="explore-model-buttons">
-        {DATA_MODEL_OPTIONS.map(({ id, label }) => (
-          <button
-            key={id}
-            type="button"
-            className={`explore-model-btn ${selectedModel === id ? 'active' : ''}`}
-            onClick={() => {
-              setSelectedModel(id)
-              setSelectedCategory('')
-              setSelectedPromptId('')
-            }}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {selectedModel && (
-        <>
-          <div className="explore-filters">
-            <label className="explore-filter">
-              <span className="explore-filter-label">Category</span>
-              <select
-                value={selectedCategory}
-                onChange={(e) => {
-                  setSelectedCategory(e.target.value)
-                  setSelectedPromptId('')
-                }}
-                className="explore-select"
-              >
-                <option value="">Select category</option>
-                {CATEGORIES.map(cat => (
-                  <option key={cat} value={cat}>{formatCategoryLabel(cat)}</option>
-                ))}
-              </select>
-            </label>
-            <label className="explore-filter">
-              <span className="explore-filter-label">Scenario</span>
-              <select
-                value={selectedPromptId}
-                onChange={(e) => setSelectedPromptId(e.target.value)}
-                className="explore-select"
-                disabled={!selectedCategory}
-              >
-                <option value="">Select scenario</option>
-                {scenariosInCategory.map(s => (
-                  <option key={s.prompt_id} value={s.prompt_id}>{s.prompt_id}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          {loading && <div className="explore-loading">Loading…</div>}
-          {error && <div className="explore-error">{error}</div>}
-
-          {data && !loading && (
-            <div className="explore-content">
-              <section className="explore-section">
-                <h3 className="explore-section-title">Prompt</h3>
-                <div className="explore-prompt">
-                  {promptForScenario?.prompts?.[0] ?? data.turns?.[0]?.userMessage ?? '—'}
-                </div>
-                {data.categoryInjection && (
-                  <div className="explore-meta">
-                    <strong>Category injection:</strong> {data.categoryInjection}
-                  </div>
-                )}
-                {data.extraInjection && (
-                  <div className="explore-meta">
-                    <strong>Extra injection:</strong> {data.extraInjection}
-                  </div>
-                )}
-              </section>
-
-              <section className="explore-section">
-                <h3 className="explore-section-title">Conversation & mental model per turn</h3>
-                <div className="explore-turns">
-                  {(data.turns || []).map((turn, idx) => (
-                    <div key={idx} className="explore-turn">
-                      <div className="explore-turn-header">Turn {turn.turnIndex + 1}</div>
-                      <div className="explore-turn-row user">
-                        <span className="explore-turn-role">User</span>
-                        <div className="explore-turn-bubble">{turn.userMessage}</div>
-                      </div>
-                      <div className="explore-turn-row assistant">
-                        <span className="explore-turn-role">Assistant</span>
-                        <div className="explore-turn-bubble">{turn.assistantMessage}</div>
-                      </div>
-                      <div className="explore-turn-mm">
-                        <span className="explore-turn-role">Mental model</span>
-                        <pre className="explore-mm-json">
-                          <code>{JSON.stringify(turn.mentalModel ?? {}, null, 2)}</code>
-                        </pre>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            </div>
-          )}
-        </>
+      {manifestLoading && <div className="explore-loading">Loading runs…</div>}
+      {manifestError && (
+        <div className="explore-error">
+          {manifestError}
+        </div>
       )}
 
-      {!selectedModel && (
-        <p className="explore-hint">Choose a mental model above to browse conversations from the data folder.</p>
+      {manifest && !manifestLoading && (
+        <>
+          <div className="explore-body">
+          <div className="explore-runs-section">
+            <h3 className="explore-runs-title">Runs</h3>
+            <p className="explore-runs-desc">Click <strong>Chatlog</strong> to open conversations for a run.</p>
+            <ul className="explore-runs-list">
+              {runs.map(r => (
+                <li key={r.id} className={`explore-runs-item ${selectedRunId === r.id ? 'explore-runs-item-selected' : ''}`}>
+                  <span className="explore-runs-label">{formatRunDisplayLabel(r)}</span>
+                  <button
+                    type="button"
+                    className="explore-runs-chatlink"
+                    onClick={() => resetAfterRun(r.id)}
+                  >
+                    Chatlog
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {selectedRunId && (
+            <div className="explore-detail">
+              <div className="explore-filters">
+                <label className="explore-filter">
+                  <span className="explore-filter-label">Category</span>
+                  <select
+                    value={selectedCategory}
+                    onChange={(e) => resetAfterCategory(e.target.value)}
+                    className="explore-select"
+                  >
+                    <option value="">Select category</option>
+                    {categories.map(cat => (
+                      <option key={cat} value={cat}>{formatCategoryLabel(cat)}</option>
+                    ))}
+                  </select>
+                </label>
+                {selectedCategory && (
+                  <label className="explore-filter">
+                    <span className="explore-filter-label">Conversation</span>
+                    <select
+                      value={selectedPromptId}
+                      onChange={(e) => {
+                        setSelectedPromptId(e.target.value)
+                        setData(null)
+                      }}
+                      className="explore-select"
+                    >
+                      <option value="">Select conversation</option>
+                      {promptIds.map(pid => (
+                        <option key={pid} value={pid}>{pid}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
+
+              {loading && <div className="explore-loading">Loading conversation…</div>}
+              {error && <div className="explore-error">{error}</div>}
+
+              {data && !loading && (
+                <div className="explore-content">
+                  <section className="explore-section">
+                    <h3 className="explore-section-title">Prompt</h3>
+                    <div className="explore-prompt">
+                      {data.turns?.[0]?.userMessage ?? '—'}
+                    </div>
+                    {data.categoryInjection && (
+                      <div className="explore-meta">
+                        <strong>Category injection:</strong> {data.categoryInjection}
+                      </div>
+                    )}
+                    {data.extraInjection && (
+                      <div className="explore-meta">
+                        <strong>Extra injection:</strong> {data.extraInjection}
+                      </div>
+                    )}
+                    {data.api_model && (
+                      <div className="explore-meta">
+                        <strong>API model:</strong> {data.api_model}
+                        {data.use_prior != null && (
+                          <span> · Prior: {data.use_prior ? 'yes' : 'no'}</span>
+                        )}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="explore-section">
+                    <h3 className="explore-section-title">Conversation & mental model per turn</h3>
+                    <div className="explore-turns">
+                      {(data.turns || []).map((turn, idx) => (
+                        <div key={idx} className="explore-turn">
+                          <div className="explore-turn-header">Turn {turn.turnIndex + 1}</div>
+                          <div className="explore-turn-row user">
+                            <span className="explore-turn-role">User</span>
+                            <div className="explore-turn-bubble">{turn.userMessage}</div>
+                          </div>
+                          <div className="explore-turn-row assistant">
+                            <span className="explore-turn-role">Assistant</span>
+                            <div className="explore-turn-bubble">{turn.assistantMessage}</div>
+                          </div>
+                          {(turn.mentalModel && Object.keys(turn.mentalModel).length > 0) && (
+                            <div className="explore-turn-mm">
+                              <span className="explore-turn-role">Mental model</span>
+                              <pre className="explore-mm-json">
+                                <code>{JSON.stringify(turn.mentalModel ?? {}, null, 2)}</code>
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+              )}
+
+              {!selectedCategory && (
+                <p className="explore-hint">Select a category to see conversations.</p>
+              )}
+              {selectedCategory && !selectedPromptId && (
+                <p className="explore-hint">Select a conversation to view.</p>
+              )}
+            </div>
+          )}
+
+          {!selectedRunId && (
+            <p className="explore-hint">
+              Click <strong>Chatlog</strong> next to a run above to browse Spiral-Bench conversations.
+            </p>
+          )}
+          </div>
+        </>
       )}
     </div>
   )

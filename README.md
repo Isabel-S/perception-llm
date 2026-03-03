@@ -84,6 +84,20 @@ When you run evals (from the UI or via `npm run run_eval`), results are written 
 
 So you can always see which API model was used for a run by checking `api_model` in the saved JSON.
 
+### Resuming a run after a crash or error
+
+**Single-call runs:** If a run fails mid-way (e.g. API error, rate limit, or OAuth error), re-run the **same** command with `--resume_run <runId>`. Use the same `--api_*`, `--seed`, and `--prior` (if you used them) as the original run. The script loads existing scenario JSONs from the run folder, skips scenarios that already have 20 turns, and continues from the first incomplete scenario (re-running that scenario from the beginning, then the rest).
+
+Example (run folder `run_gemini_3_prior`):
+
+```bash
+npm run run_eval -- --single_call --model_induct --resume_run run_gemini_3_prior --api_gemini --prior
+```
+
+If you used a seed, add it (e.g. `--seed 42`). The run ID is the folder name under `data/single_call/<model>/`, e.g. `run_gemini_3_prior`, `run_gpt-4o_2`.
+
+**Human data runs:** The CLI writes a checkpoint file after each turn. Re-run the same `--human_data --filename ...` command; it will detect the checkpoint and resume from the next turn.
+
 ## Project Structure
 
 ```

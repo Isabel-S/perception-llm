@@ -16,7 +16,7 @@ function App() {
   const [turnIndex, setTurnIndex] = useState(0)
   const [isLoadingMentalModel, setIsLoadingMentalModel] = useState(false)
   const [isLoadingAssumptions, setIsLoadingAssumptions] = useState(false)
-  const [mentalModelType, setMentalModelType] = useState('person_perception') // 'person_perception' | 'support' | 'induct' | 'structured' | 'types_support'
+  const [mentalModelType, setMentalModelType] = useState('induct') // 'person_perception' | 'support' | 'induct' | 'structured' | 'types_support'
   const [separateMentalModelResponse, setSeparateMentalModelResponse] = useState(false) // two independent calls: mental model only, then response only
   const [usePrior, setUsePrior] = useState(false) // include previous turn mental model (scores only) in prompt for induct/types_support
   const [mentalModelsByTurn, setMentalModelsByTurn] = useState([]) // one mental model per completed turn (for Prior: all past turns in conversation log)
@@ -29,13 +29,16 @@ function App() {
   const [evalSeed, setEvalSeed] = useState(42)
   const [evalMessages, setEvalMessages] = useState([])
   const [evalMentalModel, setEvalMentalModel] = useState(null)
+  const [evalMentalModelsByTurn, setEvalMentalModelsByTurn] = useState([])
   const [evalScenarioLabel, setEvalScenarioLabel] = useState('')
   const [evalSeekerPrompt, setEvalSeekerPrompt] = useState({ default: '', categoryInjection: '', extraInjection: '' })
   const [viewMode, setViewMode] = useState('chat') // 'chat' | 'explore'
-  const [humanDataPath, setHumanDataPath] = useState('do_not_upload/h01.json')
   const [humanDataStatus, setHumanDataStatus] = useState(null)
   const [humanDataProgress, setHumanDataProgress] = useState('')
   const [humanDataResumeJson, setHumanDataResumeJson] = useState(null)
+  const [humanDataResumeFileName, setHumanDataResumeFileName] = useState(null)
+  const [humanDataUploadedJson, setHumanDataUploadedJson] = useState(null)
+  const [humanDataUploadedFileName, setHumanDataUploadedFileName] = useState(null)
   const [apiProvider, setApiProviderState] = useState('gpt-4o')
 
   useEffect(() => {
@@ -177,6 +180,7 @@ function App() {
         downloadWhenDone: true,
         onScenarioStart: (runId, cat, pid, categoryInjection, extraInjection) => {
           setEvalMessages([])
+          setEvalMentalModelsByTurn([])
           setEvalScenarioLabel(`${cat}/${pid}`)
           setEvalSeekerPrompt({
             default: DEFAULT_SEEKER_PROMPT,
@@ -191,6 +195,7 @@ function App() {
             { id: ts + turnIndex * 2 + 1, role: 'assistant', content: assistantMessage, timestamp: new Date() }
           ])
           setEvalMentalModel(mentalModel)
+          setEvalMentalModelsByTurn(prev => [...prev, mentalModel])
         },
         onProgress: (runId, cat, pid, t, total) =>
           console.log(`Eval: ${runId} ${cat}/${pid} turn ${t + 1}/${total}`),
@@ -221,6 +226,7 @@ function App() {
         downloadWhenDone: true,
         onScenarioStart: (runId, cat, pid, categoryInjection, extraInjection) => {
           setEvalMessages([])
+          setEvalMentalModelsByTurn([])
           setEvalScenarioLabel(`${cat}/${pid}`)
           setEvalSeekerPrompt({
             default: DEFAULT_SEEKER_PROMPT,
@@ -234,6 +240,7 @@ function App() {
             { id: Date.now() + turnIndex * 2 + 1, role: 'assistant', content: assistantMessage, timestamp: new Date() }
           ])
           setEvalMentalModel(mentalModel)
+          setEvalMentalModelsByTurn(prev => [...prev, mentalModel])
         },
         onProgress: (runId, cat, pid, t, total, globalNum) => {
           step += 1
@@ -255,16 +262,25 @@ function App() {
 
   const runHumanData = async (resumeFrom = null) => {
     if (!['induct', 'types_support'].includes(mentalModelType)) {
-      setHumanDataStatus('Error: Human data analysis only supports Induct or Types support.')
+      setHumanDataStatus('Error: Human data analysis only supports Induct or Support.')
       return
     }
+    const json = humanDataUploadedJson && humanDataUploadedJson.messages?.length ? humanDataUploadedJson : null
+    if (!json) {
+      setHumanDataStatus('Error: Upload a conversation file (JSON with messages).')
+      return
+    }
+    const sourceName = (humanDataUploadedFileName || 'uploaded.json').replace(/\.json$/i, '')
+    const dataPath = `do_not_upload/${sourceName}.json`
     setHumanDataStatus('running')
     setEvalMessages([])
-    setEvalScenarioLabel(`Human: ${humanDataPath}`)
+    setEvalMentalModelsByTurn([])
+    setEvalScenarioLabel(`Human: ${humanDataUploadedFileName || sourceName}`)
     setHumanDataProgress('')
     try {
       const result = await runHumanDataAnalysis({
-        dataPath: humanDataPath.trim() || 'do_not_upload/h01.json',
+        dataPath,
+        rawData: json,
         mentalModelType,
         usePrior,
         existingResult: resumeFrom ?? undefined,
@@ -274,6 +290,7 @@ function App() {
             { id: Date.now() + turnIndex * 2 + 1, role: 'assistant', content: assistantMessage, timestamp: new Date() }
           ])
           setEvalMentalModel(mentalModel)
+          setEvalMentalModelsByTurn(prev => [...prev, mentalModel])
         },
         onProgress: (runId, sourceId, t, total) => {
           setHumanDataProgress(`Human analysis: turn ${t + 1}/${total}`)
@@ -292,6 +309,7 @@ function App() {
   const handleHumanDataResumeFile = (e) => {
     const file = e.target?.files?.[0]
     if (!file) return
+    setHumanDataResumeFileName(file.name)
     const reader = new FileReader()
     reader.onload = () => {
       try {
@@ -308,10 +326,56 @@ function App() {
     reader.readAsText(file)
   }
 
+  const clearResumeFile = () => {
+    setHumanDataResumeJson(null)
+    setHumanDataResumeFileName(null)
+  }
+
+  const handleHumanDataSourceFile = (e) => {
+    const file = e.target?.files?.[0]
+    if (!file) return
+    setHumanDataUploadedFileName(file.name)
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const json = JSON.parse(reader.result)
+        if (json?.messages?.length) {
+          setHumanDataUploadedJson(json)
+        } else {
+          setHumanDataUploadedJson(null)
+        }
+      } catch {
+        setHumanDataUploadedJson(null)
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  const clearSourceFile = () => {
+    setHumanDataUploadedJson(null)
+    setHumanDataUploadedFileName(null)
+  }
+
   const evalRunning = evalTestStatus === 'running' || evalFullStatus === 'running' || humanDataStatus === 'running'
 
   return (
     <div className="app">
+      <div className="app-tabs">
+        <button
+          type="button"
+          className={`app-tab ${viewMode === 'chat' ? 'app-tab-active' : ''}`}
+          onClick={() => setViewMode('chat')}
+        >
+          Run conversations
+        </button>
+        <button
+          type="button"
+          className={`app-tab ${viewMode === 'explore' ? 'app-tab-active' : ''}`}
+          onClick={() => setViewMode('explore')}
+        >
+          Explore conversations
+        </button>
+      </div>
       {viewMode === 'explore' ? (
         <div className="app-explore-wrap">
           <ExploreConversations onClose={() => setViewMode('chat')} />
@@ -319,147 +383,187 @@ function App() {
       ) : (
         <div className="app-chat-layout">
       <div className="app-controls">
-        <div className="control-row">
-          <button
-            type="button"
-            onClick={() => setViewMode('explore')}
-            className="control-btn control-btn-explore"
-            disabled={evalRunning}
-          >
-            Explore conversations
-          </button>
-        </div>
-        <label className="control-row">
-          <span className="control-label">Mental model</span>
-          <select
-            value={mentalModelType}
-            onChange={(e) => setMentalModelType(e.target.value)}
-            disabled={evalRunning}
-            className="control-select"
-          >
-            <option value="person_perception">Person perception</option>
-            {/* <option value="support">Support</option> */}
-            <option value="induct">Induct</option>
-            <option value="structured">Structured</option>
-            <option value="types_support">Types support</option>
-          </select>
-        </label>
-        <label className="control-row">
-          <span className="control-label">API model</span>
-          <select
-            value={apiProvider}
-            onChange={(e) => setApiProviderState(e.target.value)}
-            disabled={evalRunning}
-            className="control-select"
-          >
-            <option value="gpt-4o">GPT-4o (Azure)</option>
-            <option value="gemini">Gemini</option>
-            <option value="llama">Llama (Vertex)</option>
-          </select>
-        </label>
-        <label className="control-row control-row-checkbox">
-          <input
-            type="checkbox"
-            checked={separateMentalModelResponse}
-            onChange={(e) => setSeparateMentalModelResponse(e.target.checked)}
-            disabled={evalRunning}
-            className="control-checkbox"
-          />
-          <span className="control-label-inline">Separate mental model + response</span>
-        </label>
-        <label className="control-row control-row-checkbox" title={mentalModelType === 'induct' || mentalModelType === 'types_support' ? '' : 'Only for Induct or Types support'}>
-          <input
-            type="checkbox"
-            checked={usePrior}
-            onChange={(e) => setUsePrior(e.target.checked)}
-            disabled={evalRunning || (mentalModelType !== 'induct' && mentalModelType !== 'types_support')}
-            className="control-checkbox"
-          />
-          <span className="control-label-inline">Prior (previous turn mental model, scores only)</span>
-        </label>
-        <div className="control-row">
-          <button type="button" onClick={runEvalTest} disabled={evalRunning} className="control-btn control-btn-test">
-            {evalTestStatus === 'running' ? 'Running…' : 'Test eval (1×20)'}
-          </button>
-        </div>
-        <label className="control-row">
-          <span className="control-label">Start from scenario</span>
-          <input
-            type="number"
-            min={1}
-            max={30}
-            value={startFromScenario}
-            onChange={(e) => setStartFromScenario(Math.min(30, Math.max(1, parseInt(e.target.value, 10) || 1)))}
-            disabled={evalRunning}
-            className="control-input"
-          />
-        </label>
-        <label className="control-row">
-          <span className="control-label">Eval seed</span>
-          <input
-            type="number"
-            value={evalSeed}
-            onChange={(e) => {
-              const n = parseInt(e.target.value, 10)
-              setEvalSeed(Number.isNaN(n) ? 42 : n)
-            }}
-            disabled={evalRunning}
-            className="control-input"
-          />
-        </label>
-        <div className="control-row">
-          <button type="button" onClick={runEvalFull} disabled={evalRunning} className="control-btn control-btn-full">
-            {evalFullStatus === 'running' ? 'Running full eval…' : 'Run full eval (30×20)'}
-          </button>
-        </div>
-        <div className="control-row" style={{ flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <span className="control-label">Human data (induct/types_support):</span>
-          <input
-            type="text"
-            value={humanDataPath}
-            onChange={(e) => setHumanDataPath(e.target.value)}
-            disabled={evalRunning}
-            placeholder="do_not_upload/h01.json"
-            className="control-input"
-            style={{ minWidth: 180 }}
-          />
-          <button type="button" onClick={() => runHumanData()} disabled={evalRunning} className="control-btn">
-            {humanDataStatus === 'running' ? 'Running…' : 'Run human data analysis'}
-          </button>
-        </div>
-        <div className="control-row" style={{ flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <label className="control-label-inline" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input type="file" accept=".json" onChange={handleHumanDataResumeFile} disabled={evalRunning} />
-            Load previous result
+        <section className="control-section">
+          <h3 className="control-section-title">Model & API</h3>
+          <label className="control-row">
+            <span className="control-label">Mental model</span>
+            <select
+              value={mentalModelType}
+              onChange={(e) => setMentalModelType(e.target.value)}
+              disabled={evalRunning}
+              className="control-select"
+            >
+              <option value="induct">Induct</option>
+              <option value="types_support">Support</option>
+              <option value="structured">Structured</option>
+              <option value="person_perception">Person perception (experimental)</option>
+            </select>
           </label>
-          <button type="button" onClick={() => runHumanData(humanDataResumeJson)} disabled={evalRunning || !humanDataResumeJson} className="control-btn">
-            Resume human data analysis
-          </button>
-        </div>
-        {humanDataStatus && humanDataStatus !== 'running' && <div className="control-status">{humanDataStatus}</div>}
-        {humanDataProgress && <div className="control-progress">{humanDataProgress}</div>}
-        {evalTestStatus && evalTestStatus !== 'running' && <div className="control-status">{evalTestStatus}</div>}
-        {evalFullStatus && evalFullStatus !== 'running' && <div className="control-status">{evalFullStatus}</div>}
-        {evalFullProgress && <div className="control-progress">{evalFullProgress}</div>}
+          <label className="control-row">
+            <span className="control-label">API model</span>
+            <select
+              value={apiProvider}
+              onChange={(e) => setApiProviderState(e.target.value)}
+              disabled={evalRunning}
+              className="control-select"
+            >
+              <option value="gpt-4o">GPT-4o (Azure)</option>
+              <option value="gemini">Gemini</option>
+              <option value="llama">Llama (Vertex)</option>
+            </select>
+          </label>
+          <label className="control-row control-row-checkbox">
+            <input
+              type="checkbox"
+              checked={separateMentalModelResponse}
+              onChange={(e) => setSeparateMentalModelResponse(e.target.checked)}
+              disabled={evalRunning}
+              className="control-checkbox"
+            />
+            <span className="control-label-inline">Separate mental model + response</span>
+          </label>
+          <label className="control-row control-row-checkbox" title={mentalModelType === 'induct' || mentalModelType === 'types_support' ? '' : 'Only for Induct or Support'}>
+            <input
+              type="checkbox"
+              checked={usePrior}
+              onChange={(e) => setUsePrior(e.target.checked)}
+              disabled={evalRunning || (mentalModelType !== 'induct' && mentalModelType !== 'types_support')}
+              className="control-checkbox"
+            />
+            <span className="control-label-inline">Prior (scores from previous turn)</span>
+          </label>
+        </section>
+
+        <section className="control-section control-section-collapsible">
+          <details className="control-details">
+            <summary className="control-details-summary">Run simulated eval</summary>
+            <div className="control-details-content">
+              <p className="control-section-desc">30×20 turns (or test 1). From <a href="https://eqbench.com/spiral-bench.html" target="_blank" rel="noopener noreferrer" className="control-link">Spiral-Bench</a>.</p>
+              <div className="control-row">
+                <button type="button" onClick={runEvalTest} disabled={evalRunning} className="control-btn control-btn-test">
+                  {evalTestStatus === 'running' ? 'Running…' : 'Test eval (1×20)'}
+                </button>
+              </div>
+              <label className="control-row">
+                <span className="control-label">Start from scenario</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={startFromScenario}
+                  onChange={(e) => setStartFromScenario(Math.min(30, Math.max(1, parseInt(e.target.value, 10) || 1)))}
+                  disabled={evalRunning}
+                  className="control-input"
+                />
+              </label>
+              <label className="control-row">
+                <span className="control-label">Eval seed</span>
+                <input
+                  type="number"
+                  value={evalSeed}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10)
+                    setEvalSeed(Number.isNaN(n) ? 42 : n)
+                  }}
+                  disabled={evalRunning}
+                  className="control-input"
+                />
+              </label>
+              <div className="control-row">
+                <button type="button" onClick={runEvalFull} disabled={evalRunning} className="control-btn control-btn-full">
+                  {evalFullStatus === 'running' ? 'Running full eval…' : 'Run full eval (30×20)'}
+                </button>
+              </div>
+              {evalTestStatus && evalTestStatus !== 'running' && <div className="control-status">{evalTestStatus}</div>}
+              {evalFullStatus && evalFullStatus !== 'running' && <div className="control-status">{evalFullStatus}</div>}
+              {evalFullProgress && <div className="control-progress">{evalFullProgress}</div>}
+            </div>
+          </details>
+        </section>
+
+        <section className="control-section control-section-collapsible">
+          <details className="control-details">
+            <summary className="control-details-summary">Run human data</summary>
+            <div className="control-details-content">
+              <p className="control-section-desc">Mental model analysis for a conversation (JSON).</p>
+          <div className="file-upload-row">
+            <span className="control-label">Conversation file</span>
+            <input
+              id="human-data-source-file"
+              type="file"
+              accept=".json"
+              onChange={handleHumanDataSourceFile}
+              disabled={evalRunning}
+              className="file-upload-input"
+            />
+            <label htmlFor="human-data-source-file" className="file-upload-label">
+              {humanDataUploadedFileName ? humanDataUploadedFileName : 'Choose conversation file…'}
+            </label>
+            {humanDataUploadedFileName && !humanDataUploadedJson && (
+              <span className="file-upload-error">Invalid or missing messages</span>
+            )}
+            {humanDataUploadedJson && (
+              <span className="file-upload-meta">{humanDataUploadedJson.messages?.length ?? 0} messages</span>
+            )}
+            {humanDataUploadedJson && (
+              <button type="button" onClick={clearSourceFile} disabled={evalRunning} className="control-btn control-btn-ghost" style={{ marginTop: 4 }}>
+                Clear file
+              </button>
+            )}
+          </div>
+          <div className="control-row" style={{ marginTop: 16 }}>
+            <button type="button" onClick={() => runHumanData()} disabled={evalRunning || !humanDataUploadedJson} className="control-btn control-btn-primary" style={{ width: '100%' }}>
+              {humanDataStatus === 'running' ? 'Running…' : 'Run human data analysis'}
+            </button>
+          </div>
+
+          <div className="control-section-resume">
+            <span className="control-label">Resume from checkpoint</span>
+            <p className="control-section-desc">Load checkpoint (meta + turns). Click Resume to continue.</p>
+            <div className="file-upload-row">
+              <input
+                id="human-data-resume-file"
+                type="file"
+                accept=".json"
+                onChange={handleHumanDataResumeFile}
+                disabled={evalRunning}
+                className="file-upload-input"
+              />
+              <label htmlFor="human-data-resume-file" className="file-upload-label">
+                {humanDataResumeFileName ? humanDataResumeFileName : 'Choose checkpoint file…'}
+              </label>
+              {humanDataResumeJson && (
+                <span className="file-upload-meta">
+                  {humanDataResumeJson.turns?.length ?? 0} turns · up to turn {(humanDataResumeJson.meta?.turns_recorded_up_to ?? -1) + 1}
+                </span>
+              )}
+              {humanDataResumeFileName && !humanDataResumeJson && (
+                <span className="file-upload-error">Invalid or missing meta/turns</span>
+              )}
+            </div>
+            <div className="control-row" style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => runHumanData(humanDataResumeJson)}
+                disabled={evalRunning || !humanDataResumeJson}
+                className="control-btn control-btn-resume"
+                style={{ width: '100%' }}
+              >
+                Resume from checkpoint
+              </button>
+              {humanDataResumeJson && (
+                <button type="button" onClick={clearResumeFile} disabled={evalRunning} className="control-btn control-btn-ghost" style={{ width: '100%', marginTop: 6 }}>
+                  Clear file
+                </button>
+              )}
+            </div>
+          </div>
+          {humanDataStatus && humanDataStatus !== 'running' && <div className="control-status">{humanDataStatus}</div>}
+          {humanDataProgress && <div className="control-progress">{humanDataProgress}</div>}
+            </div>
+          </details>
+        </section>
       </div>
-      {evalRunning && (evalSeekerPrompt.default || evalSeekerPrompt.categoryInjection || evalSeekerPrompt.extraInjection) && (
-        <div style={{ padding: '10px', background: '#f9f9f9', borderBottom: '1px solid #ddd', fontSize: '12px' }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>Seeker prompt for this scenario:</div>
-          {evalSeekerPrompt.default && (
-            <div style={{ marginBottom: 8, whiteSpace: 'pre-wrap' }}>{evalSeekerPrompt.default}</div>
-          )}
-          {evalSeekerPrompt.categoryInjection && (
-            <div style={{ marginBottom: 4, padding: '4px 8px', background: '#e3f2fd', borderRadius: 4, color: '#1565c0', fontWeight: 500 }}>
-              <strong>Category injection:</strong> {evalSeekerPrompt.categoryInjection}
-            </div>
-          )}
-          {evalSeekerPrompt.extraInjection && (
-            <div style={{ marginTop: 4, padding: '4px 8px', background: '#fff3e0', borderRadius: 4, color: '#e65100', fontWeight: 500 }}>
-              <strong>Extra injection:</strong> {evalSeekerPrompt.extraInjection}
-            </div>
-          )}
-        </div>
-      )}
       <ChatInterface 
         messages={evalRunning ? evalMessages : messages}
         onSendMessage={handleSendMessage}
@@ -471,6 +575,7 @@ function App() {
         assumptions={evalRunning ? null : assumptions}
         assumptionsHistory={evalRunning ? [] : assumptionsHistory}
         mentalModel={evalRunning ? evalMentalModel : mentalModel}
+        mentalModelsByTurn={evalRunning ? evalMentalModelsByTurn : mentalModelsByTurn}
         isLoadingMentalModel={evalRunning ? false : isLoadingMentalModel}
         isLoadingAssumptions={isLoadingAssumptions}
         useOldModel={useOldModel}
