@@ -71,6 +71,19 @@ function copySingleCallDataToDist() {
       copyRecursive(SINGLE_CALL_DIR, outDir)
       const manifest = buildSingleCallManifest()
       fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest))
+
+      // Copy plot HTMLs from csvs_plots/plots/single_call to dist for Chart view
+      const plotsSrc = path.join(process.cwd(), 'csvs_plots', 'plots', 'single_call')
+      const plotsDest = path.join(process.cwd(), 'dist', 'data', 'plots', 'single_call')
+      if (fs.existsSync(plotsSrc)) {
+        fs.mkdirSync(plotsDest, { recursive: true })
+        const files = fs.readdirSync(plotsSrc, { withFileTypes: true })
+        for (const e of files) {
+          if (e.isFile() && e.name.endsWith('.html')) {
+            fs.copyFileSync(path.join(plotsSrc, e.name), path.join(plotsDest, e.name))
+          }
+        }
+      }
     },
   }
 }
@@ -100,6 +113,23 @@ function serveData() {
           } catch (e) {
             res.statusCode = 500
             res.end(e.message)
+            return
+          }
+        }
+
+        // Serve plot HTMLs from csvs_plots/plots in dev
+        if (urlPath.startsWith('plots/')) {
+          const plotPath = path.join(process.cwd(), 'csvs_plots', 'plots', urlPath.slice(6))
+          if (plotPath.startsWith(path.join(process.cwd(), 'csvs_plots', 'plots'))) {
+            fs.readFile(plotPath, (err, data) => {
+              if (err) {
+                res.statusCode = err.code === 'ENOENT' ? 404 : 500
+                res.end(err.message)
+                return
+              }
+              res.setHeader('Content-Type', 'text/html')
+              res.end(data)
+            })
             return
           }
         }

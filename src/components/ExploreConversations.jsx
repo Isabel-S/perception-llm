@@ -9,6 +9,9 @@ function getDataBaseUrl() {
 const getManifestUrl = () => getDataBaseUrl() + 'data/single_call/manifest.json'
 const getConversationUrl = (runId, category, promptId) =>
   getDataBaseUrl() + `data/single_call/${runId}/${category}/${promptId}.json`
+/** Plot HTML for a run: run id "induct/run_gemini_3_prior" → data/plots/single_call/induct_run_gemini_3_prior.html */
+const getPlotUrl = (runId) =>
+  getDataBaseUrl() + 'data/plots/single_call/' + runId.replace(/\//g, '_') + '.html'
 
 function formatCategoryLabel(cat) {
   return cat.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
@@ -55,6 +58,7 @@ export default function ExploreConversations({ onClose }) {
   const [manifestError, setManifestError] = useState(null)
 
   const [selectedRunId, setSelectedRunId] = useState('')
+  const [viewMode, setViewMode] = useState('chatlog') // 'chatlog' | 'chart'
   const [selectedCategory, setSelectedCategory] = useState('')
   const [selectedPromptId, setSelectedPromptId] = useState('')
 
@@ -107,8 +111,17 @@ export default function ExploreConversations({ onClose }) {
       .finally(() => setLoading(false))
   }, [selectedRunId, selectedCategory, selectedPromptId])
 
-  const resetAfterRun = (runId) => {
+  const selectRunChart = (runId) => {
     setSelectedRunId(runId)
+    setViewMode('chart')
+    setSelectedCategory('')
+    setSelectedPromptId('')
+    setData(null)
+  }
+
+  const selectRunChatlog = (runId) => {
+    setSelectedRunId(runId)
+    setViewMode('chatlog')
     setSelectedCategory('')
     setSelectedPromptId('')
     setData(null)
@@ -142,18 +155,27 @@ export default function ExploreConversations({ onClose }) {
           <>
           <div className="explore-runs-section">
             <h3 className="explore-runs-title">Runs</h3>
-            <p className="explore-runs-desc">Click <strong>Chatlog</strong> to open conversations for a run.</p>
+            <p className="explore-runs-desc">Click <strong>Chatlog</strong> or <strong>Chart</strong> for a run.</p>
             <ul className="explore-runs-list">
               {runs.map(r => (
                 <li key={r.id} className={`explore-runs-item ${selectedRunId === r.id ? 'explore-runs-item-selected' : ''}`}>
                   <span className="explore-runs-label">{formatRunDisplayLabel(r)}</span>
-                  <button
-                    type="button"
-                    className="explore-runs-chatlink"
-                    onClick={() => resetAfterRun(r.id)}
-                  >
-                    Chatlog
-                  </button>
+                  <span className="explore-runs-buttons">
+                    <button
+                      type="button"
+                      className={`explore-runs-chatlink ${viewMode === 'chatlog' && selectedRunId === r.id ? 'explore-runs-btn-active' : ''}`}
+                      onClick={() => selectRunChatlog(r.id)}
+                    >
+                      Chatlog
+                    </button>
+                    <button
+                      type="button"
+                      className={`explore-runs-chatlink explore-runs-chartlink ${viewMode === 'chart' && selectedRunId === r.id ? 'explore-runs-btn-active' : ''}`}
+                      onClick={() => selectRunChart(r.id)}
+                    >
+                      Chart
+                    </button>
+                  </span>
                 </li>
               ))}
             </ul>
@@ -161,6 +183,16 @@ export default function ExploreConversations({ onClose }) {
 
           {selectedRunId && (
             <div className="explore-detail">
+              {viewMode === 'chart' ? (
+                <div className="explore-chart-wrap">
+                  <iframe
+                    title={`Chart: ${formatRunDisplayLabel(selectedRun)}`}
+                    src={getPlotUrl(selectedRunId)}
+                    className="explore-chart-iframe"
+                  />
+                </div>
+              ) : (
+                <>
               <div className="explore-filters">
                 <label className="explore-filter">
                   <span className="explore-filter-label">Category</span>
@@ -260,12 +292,14 @@ export default function ExploreConversations({ onClose }) {
               {selectedCategory && !selectedPromptId && (
                 <p className="explore-hint">Select a conversation to view.</p>
               )}
+                </>
+              )}
             </div>
           )}
 
           {!selectedRunId && (
             <p className="explore-hint">
-              Click <strong>Chatlog</strong> next to a run above to browse Spiral-Bench conversations.
+              Click <strong>Chatlog</strong> or <strong>Chart</strong> next to a run above to browse conversations or view plots.
             </p>
           )}
           </>
