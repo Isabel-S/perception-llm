@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import ChatInterface from './components/ChatInterface'
 import VisualizationPanel from './components/VisualizationPanel'
-import { sendMessageToLLM, sendMessageWithInlineMentalModel, inferUncertainAssumptions, inferMentalModel, inferMentalModelOld, run_simulations } from './services/api'
+import ExploreConversations from './components/ExploreConversations'
+import { sendMessageToLLM, sendMessageWithInlineMentalModel, sendMessageSeparateMentalModelAndResponse, inferUncertainAssumptions, inferMentalModel, inferMentalModelOld, run_simulations, runHumanDataAnalysis, setApiProvider } from './services/api'
 import { DEFAULT_SEEKER_PROMPT } from './eval/default_prompt.js'
 import './App.css'
 
@@ -15,17 +16,31 @@ function App() {
   const [turnIndex, setTurnIndex] = useState(0)
   const [isLoadingMentalModel, setIsLoadingMentalModel] = useState(false)
   const [isLoadingAssumptions, setIsLoadingAssumptions] = useState(false)
-  const [mentalModelType, setMentalModelType] = useState('person_perception') // 'person_perception' | 'old_model' | 'support' | 'induct' | 'structured'
+  const [mentalModelType, setMentalModelType] = useState('person_perception') // 'person_perception' | 'support' | 'induct' | 'structured' | 'types_support'
+  const [separateMentalModelResponse, setSeparateMentalModelResponse] = useState(false) // two independent calls: mental model only, then response only
+  const [usePrior, setUsePrior] = useState(false) // include previous turn mental model (scores only) in prompt for induct/types_support
+  const [mentalModelsByTurn, setMentalModelsByTurn] = useState([]) // one mental model per completed turn (for Prior: all past turns in conversation log)
   const useOldModel = mentalModelType === 'old_model'
   const [memory, setMemory] = useState({ turn_index: [] }) // Memory for new model
   const [evalTestStatus, setEvalTestStatus] = useState(null)
   const [evalFullStatus, setEvalFullStatus] = useState(null)
   const [evalFullProgress, setEvalFullProgress] = useState('')
   const [startFromScenario, setStartFromScenario] = useState(1)
+  const [evalSeed, setEvalSeed] = useState(42)
   const [evalMessages, setEvalMessages] = useState([])
   const [evalMentalModel, setEvalMentalModel] = useState(null)
   const [evalScenarioLabel, setEvalScenarioLabel] = useState('')
   const [evalSeekerPrompt, setEvalSeekerPrompt] = useState({ default: '', categoryInjection: '', extraInjection: '' })
+  const [viewMode, setViewMode] = useState('chat') // 'chat' | 'explore'
+  const [humanDataPath, setHumanDataPath] = useState('do_not_upload/h01.json')
+  const [humanDataStatus, setHumanDataStatus] = useState(null)
+  const [humanDataProgress, setHumanDataProgress] = useState('')
+  const [humanDataResumeJson, setHumanDataResumeJson] = useState(null)
+  const [apiProvider, setApiProviderState] = useState('gpt-4o')
+
+  useEffect(() => {
+    setApiProvider(apiProvider)
+  }, [apiProvider])
 
   const handleSendMessage = async (message) => {
     // Add user message
@@ -55,10 +70,14 @@ function App() {
 
       try {
         if (isInlineMentalModel) {
-          const result = await sendMessageWithInlineMentalModel(conversationHistory, message, mentalModelType)
+          const priorMentalModelsByTurn = (usePrior && ['induct', 'types_support'].includes(mentalModelType)) ? mentalModelsByTurn : null
+          const result = separateMentalModelResponse
+            ? await sendMessageSeparateMentalModelAndResponse(conversationHistory, message, mentalModelType, priorMentalModelsByTurn)
+            : await sendMessageWithInlineMentalModel(conversationHistory, message, mentalModelType, priorMentalModelsByTurn)
           mmData = result.mentalModel
           response = result.response
           setMentalModel(mmData)
+          setMentalModelsByTurn(prev => [...prev, mmData])
         } else {
           mmData = useOldModel
             ? await inferMentalModelOld(message)
@@ -151,7 +170,9 @@ function App() {
       const result = await run_simulations({
         mentalModelType,
         useOldModel,
+        useSeparateMentalModelResponse: separateMentalModelResponse,
         numTurns: 20,
+        seed: evalSeed,
         maxScenarios: 1,
         downloadWhenDone: true,
         onScenarioStart: (runId, cat, pid, categoryInjection, extraInjection) => {
@@ -173,6 +194,7 @@ function App() {
         },
         onProgress: (runId, cat, pid, t, total) =>
           console.log(`Eval: ${runId} ${cat}/${pid} turn ${t + 1}/${total}`),
+        usePrior: (mentalModelType === 'induct' || mentalModelType === 'types_support') && usePrior,
       })
       console.log('Eval test result:', result)
       setEvalTestStatus(`Done. runId=${result.runId}. ZIP downloaded.`)
@@ -192,7 +214,9 @@ function App() {
       const result = await run_simulations({
         mentalModelType,
         useOldModel,
+        useSeparateMentalModelResponse: separateMentalModelResponse,
         numTurns: 20,
+        seed: evalSeed,
         startScenarioIndex: Math.max(0, startFromScenario - 1),
         downloadWhenDone: true,
         onScenarioStart: (runId, cat, pid, categoryInjection, extraInjection) => {
@@ -218,6 +242,7 @@ function App() {
           console.log(msg)
           setEvalFullProgress(`Scenario ${scenarioNum}/30 · ${cat}/${pid} turn ${t + 1}/${total}`)
         },
+        usePrior: (mentalModelType === 'induct' || mentalModelType === 'types_support') && usePrior,
       })
       setEvalFullStatus(`Done. runId=${result.runId}. ZIP downloaded.`)
       setEvalFullProgress('')
@@ -228,32 +253,137 @@ function App() {
     }
   }
 
-  const evalRunning = evalTestStatus === 'running' || evalFullStatus === 'running'
+  const runHumanData = async (resumeFrom = null) => {
+    if (!['induct', 'types_support'].includes(mentalModelType)) {
+      setHumanDataStatus('Error: Human data analysis only supports Induct or Types support.')
+      return
+    }
+    setHumanDataStatus('running')
+    setEvalMessages([])
+    setEvalScenarioLabel(`Human: ${humanDataPath}`)
+    setHumanDataProgress('')
+    try {
+      const result = await runHumanDataAnalysis({
+        dataPath: humanDataPath.trim() || 'do_not_upload/h01.json',
+        mentalModelType,
+        usePrior,
+        existingResult: resumeFrom ?? undefined,
+        onTurn: (runId, sourceId, turnIndex, userMessage, assistantMessage, mentalModel) => {
+          setEvalMessages(prev => [...prev,
+            { id: Date.now() + turnIndex * 2, role: 'user', content: userMessage, timestamp: new Date() },
+            { id: Date.now() + turnIndex * 2 + 1, role: 'assistant', content: assistantMessage, timestamp: new Date() }
+          ])
+          setEvalMentalModel(mentalModel)
+        },
+        onProgress: (runId, sourceId, t, total) => {
+          setHumanDataProgress(`Human analysis: turn ${t + 1}/${total}`)
+        },
+        downloadWhenDone: true,
+      })
+      setHumanDataStatus(`Done. ${result.runId}. ZIP downloaded. Up to turn ${result.meta.turns_recorded_up_to + 1}.`)
+      setHumanDataProgress('')
+    } catch (err) {
+      console.error('Human data analysis error:', err)
+      setHumanDataStatus(`Error: ${err.message}`)
+      setHumanDataProgress('')
+    }
+  }
+
+  const handleHumanDataResumeFile = (e) => {
+    const file = e.target?.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const json = JSON.parse(reader.result)
+        if (json?.meta && Array.isArray(json.turns)) {
+          setHumanDataResumeJson(json)
+        } else {
+          setHumanDataResumeJson(null)
+        }
+      } catch {
+        setHumanDataResumeJson(null)
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  const evalRunning = evalTestStatus === 'running' || evalFullStatus === 'running' || humanDataStatus === 'running'
 
   return (
     <div className="app">
-      <div style={{ padding: '8px', background: '#f0f0f0', fontSize: '12px' }}>
-        <label style={{ marginRight: 8 }}>
-          Mental model:
+      {viewMode === 'explore' ? (
+        <div className="app-explore-wrap">
+          <ExploreConversations onClose={() => setViewMode('chat')} />
+        </div>
+      ) : (
+        <div className="app-chat-layout">
+      <div className="app-controls">
+        <div className="control-row">
+          <button
+            type="button"
+            onClick={() => setViewMode('explore')}
+            className="control-btn control-btn-explore"
+            disabled={evalRunning}
+          >
+            Explore conversations
+          </button>
+        </div>
+        <label className="control-row">
+          <span className="control-label">Mental model</span>
           <select
             value={mentalModelType}
             onChange={(e) => setMentalModelType(e.target.value)}
             disabled={evalRunning}
-            style={{ marginLeft: 4 }}
+            className="control-select"
           >
             <option value="person_perception">Person perception</option>
-            <option value="old_model">Old model</option>
-            <option value="support">Support</option>
+            {/* <option value="support">Support</option> */}
             <option value="induct">Induct</option>
             <option value="structured">Structured</option>
             <option value="types_support">Types support</option>
           </select>
         </label>
-        <button type="button" onClick={runEvalTest} disabled={evalRunning}>
-          {evalTestStatus === 'running' ? 'Running…' : 'Test eval (1×20)'}
-        </button>
-        <label style={{ marginLeft: 8 }}>
-          Start from scenario:
+        <label className="control-row">
+          <span className="control-label">API model</span>
+          <select
+            value={apiProvider}
+            onChange={(e) => setApiProviderState(e.target.value)}
+            disabled={evalRunning}
+            className="control-select"
+          >
+            <option value="gpt-4o">GPT-4o (Azure)</option>
+            <option value="gemini">Gemini</option>
+            <option value="llama">Llama (Vertex)</option>
+          </select>
+        </label>
+        <label className="control-row control-row-checkbox">
+          <input
+            type="checkbox"
+            checked={separateMentalModelResponse}
+            onChange={(e) => setSeparateMentalModelResponse(e.target.checked)}
+            disabled={evalRunning}
+            className="control-checkbox"
+          />
+          <span className="control-label-inline">Separate mental model + response</span>
+        </label>
+        <label className="control-row control-row-checkbox" title={mentalModelType === 'induct' || mentalModelType === 'types_support' ? '' : 'Only for Induct or Types support'}>
+          <input
+            type="checkbox"
+            checked={usePrior}
+            onChange={(e) => setUsePrior(e.target.checked)}
+            disabled={evalRunning || (mentalModelType !== 'induct' && mentalModelType !== 'types_support')}
+            className="control-checkbox"
+          />
+          <span className="control-label-inline">Prior (previous turn mental model, scores only)</span>
+        </label>
+        <div className="control-row">
+          <button type="button" onClick={runEvalTest} disabled={evalRunning} className="control-btn control-btn-test">
+            {evalTestStatus === 'running' ? 'Running…' : 'Test eval (1×20)'}
+          </button>
+        </div>
+        <label className="control-row">
+          <span className="control-label">Start from scenario</span>
           <input
             type="number"
             min={1}
@@ -261,15 +391,56 @@ function App() {
             value={startFromScenario}
             onChange={(e) => setStartFromScenario(Math.min(30, Math.max(1, parseInt(e.target.value, 10) || 1)))}
             disabled={evalRunning}
-            style={{ width: 40, marginLeft: 4 }}
+            className="control-input"
           />
         </label>
-        <button type="button" onClick={runEvalFull} disabled={evalRunning} style={{ marginLeft: 8 }}>
-          {evalFullStatus === 'running' ? 'Running full eval…' : 'Run full eval (30×20)'}
-        </button>
-        {evalTestStatus && evalTestStatus !== 'running' && <span style={{ marginLeft: 8 }}>{evalTestStatus}</span>}
-        {evalFullStatus && evalFullStatus !== 'running' && <span style={{ marginLeft: 8 }}>{evalFullStatus}</span>}
-        {evalFullProgress && <div style={{ marginTop: 4 }}>{evalFullProgress}</div>}
+        <label className="control-row">
+          <span className="control-label">Eval seed</span>
+          <input
+            type="number"
+            value={evalSeed}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10)
+              setEvalSeed(Number.isNaN(n) ? 42 : n)
+            }}
+            disabled={evalRunning}
+            className="control-input"
+          />
+        </label>
+        <div className="control-row">
+          <button type="button" onClick={runEvalFull} disabled={evalRunning} className="control-btn control-btn-full">
+            {evalFullStatus === 'running' ? 'Running full eval…' : 'Run full eval (30×20)'}
+          </button>
+        </div>
+        <div className="control-row" style={{ flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <span className="control-label">Human data (induct/types_support):</span>
+          <input
+            type="text"
+            value={humanDataPath}
+            onChange={(e) => setHumanDataPath(e.target.value)}
+            disabled={evalRunning}
+            placeholder="do_not_upload/h01.json"
+            className="control-input"
+            style={{ minWidth: 180 }}
+          />
+          <button type="button" onClick={() => runHumanData()} disabled={evalRunning} className="control-btn">
+            {humanDataStatus === 'running' ? 'Running…' : 'Run human data analysis'}
+          </button>
+        </div>
+        <div className="control-row" style={{ flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <label className="control-label-inline" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="file" accept=".json" onChange={handleHumanDataResumeFile} disabled={evalRunning} />
+            Load previous result
+          </label>
+          <button type="button" onClick={() => runHumanData(humanDataResumeJson)} disabled={evalRunning || !humanDataResumeJson} className="control-btn">
+            Resume human data analysis
+          </button>
+        </div>
+        {humanDataStatus && humanDataStatus !== 'running' && <div className="control-status">{humanDataStatus}</div>}
+        {humanDataProgress && <div className="control-progress">{humanDataProgress}</div>}
+        {evalTestStatus && evalTestStatus !== 'running' && <div className="control-status">{evalTestStatus}</div>}
+        {evalFullStatus && evalFullStatus !== 'running' && <div className="control-status">{evalFullStatus}</div>}
+        {evalFullProgress && <div className="control-progress">{evalFullProgress}</div>}
       </div>
       {evalRunning && (evalSeekerPrompt.default || evalSeekerPrompt.categoryInjection || evalSeekerPrompt.extraInjection) && (
         <div style={{ padding: '10px', background: '#f9f9f9', borderBottom: '1px solid #ddd', fontSize: '12px' }}>
@@ -305,6 +476,8 @@ function App() {
         useOldModel={useOldModel}
         mentalModelType={mentalModelType}
       />
+        </div>
+      )}
     </div>
   )
 }

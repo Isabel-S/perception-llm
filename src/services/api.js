@@ -1,39 +1,127 @@
-// API service for Azure OpenAI integration
-// All config from env: VITE_AZURE_ENDPOINT, VITE_AZURE_API_KEY, VITE_AZURE_DEPLOYMENT, VITE_AZURE_API_VERSION
+// API service for Azure OpenAI and Google Gemini
+// Azure: VITE_AZURE_* env vars
+// Gemini (browser): VITE_GEMINI_API_KEY (Google AI Studio key)
+// Gemini (Node/CLI): Vertex AI with service account JSON.
+//   Set GOOGLE_APPLICATION_CREDENTIALS=path/to/service_account.json in .env
+//   Optional: VITE_GEMINI_PROJECT_ID, VITE_GEMINI_LOCATION (default us-central1), VITE_GEMINI_MODEL
+// Llama (Node/CLI only): Vertex AI with same service account.
+//   Set GOOGLE_APPLICATION_CREDENTIALS, LLAMA_PROJECT_ID (or VITE_LLAMA_*), optional LLAMA_LOCATION, LLAMA_MODEL_ID
+// Provider: VITE_API_PROVIDER=gpt-4o|gemini|llama (or set via UI/CLI)
 
 import JSZip from 'jszip'
 import { DEFAULT_SEEKER_PROMPT } from '../eval/default_prompt.js'
 import { CATEGORY_INJECTIONS } from '../eval/categories.js'
 import { INJECTION_BEHAVIORS } from '../eval/injections.js'
 import { SCENARIOS } from '../eval/scenarios.js'
-import { buildPromptWithHistory, parseSingleCallResponse, INLINE_MENTAL_MODEL_TYPES } from '../eval/mental_model_prompts.js'
+import {
+  buildPromptWithHistory,
+  buildMentalModelOnlyPrompt,
+  buildResponseOnlyPrompt,
+  buildHistoryBlockWithPriors,
+  parseSingleCallResponse,
+  parseMentalModelOnlyResponse,
+  parseResponseOnlyContent,
+  INLINE_MENTAL_MODEL_TYPES
+} from '../eval/mental_model_prompts.js'
 
-const AZURE_ENDPOINT = import.meta.env.VITE_AZURE_ENDPOINT ?? ''
-const AZURE_API_KEY = import.meta.env.VITE_AZURE_API_KEY ?? ''
-const AZURE_DEPLOYMENT = import.meta.env.VITE_AZURE_DEPLOYMENT ?? ''
-const AZURE_API_VERSION = import.meta.env.VITE_AZURE_API_VERSION ?? ''
+const env = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : (typeof process !== 'undefined' ? process.env : {})
+const AZURE_ENDPOINT = env.VITE_AZURE_ENDPOINT ?? ''
+const AZURE_API_KEY = env.VITE_AZURE_API_KEY ?? ''
+const AZURE_DEPLOYMENT = env.VITE_AZURE_DEPLOYMENT ?? ''
+const AZURE_API_VERSION = env.VITE_AZURE_API_VERSION ?? ''
+
+const GEMINI_API_KEY = env.VITE_GEMINI_API_KEY ?? ''
+const GEMINI_MODEL = env.VITE_GEMINI_MODEL || 'gemini-1.5-flash'
+const GEMINI_PROJECT_ID = env.VITE_GEMINI_PROJECT_ID || env.GEMINI_PROJECT_ID || ''
+const GEMINI_LOCATION = env.VITE_GEMINI_LOCATION || env.GEMINI_LOCATION || 'us-central1'
+/** In Node, path to service account JSON for Vertex AI (optional; when set, Gemini uses Vertex instead of API key). */
+const GOOGLE_APPLICATION_CREDENTIALS = typeof process !== 'undefined' && process.env && process.env.GOOGLE_APPLICATION_CREDENTIALS
+/** Llama via Vertex AI (Node only). Same service account as Gemini Vertex. */
+const LLAMA_PROJECT_ID = env.VITE_LLAMA_PROJECT_ID || env.LLAMA_PROJECT_ID || ''
+const LLAMA_LOCATION = env.VITE_LLAMA_LOCATION || env.LLAMA_LOCATION || 'us-central1'
+const LLAMA_MODEL_ID = env.VITE_LLAMA_MODEL_ID || env.LLAMA_MODEL_ID || 'meta/llama-3.3-70b-instruct-maas'
+const DEFAULT_API_PROVIDER = (() => {
+  const p = (env.VITE_API_PROVIDER || 'gpt-4o').toLowerCase().replace(/-/g, '')
+  if (p === 'gemini') return 'gemini'
+  if (p === 'llama') return 'llama'
+  return 'gpt-4o'
+})()
+
+/** Current API provider: 'gpt-4o' | 'gemini' | 'llama'. Set via setApiProvider (UI/CLI). */
+let apiProvider = DEFAULT_API_PROVIDER
+
+export function setApiProvider(provider) {
+  const p = String(provider || '').toLowerCase().replace(/-/g, '')
+  if (p === 'gemini') apiProvider = 'gemini'
+  else if (p === 'llama') apiProvider = 'llama'
+  else apiProvider = 'gpt-4o'
+}
+
+export function getApiProvider() {
+  return apiProvider
+}
+
+function requireAzureEnv() {
+  if (!AZURE_ENDPOINT || !AZURE_API_KEY || !AZURE_DEPLOYMENT || !AZURE_API_VERSION) {
+    throw new Error(
+      `Azure OpenAI config missing. Set in .env: VITE_AZURE_ENDPOINT, VITE_AZURE_API_KEY, VITE_AZURE_DEPLOYMENT, VITE_AZURE_API_VERSION`
+    )
+  }
+}
+
+function requireGeminiEnv() {
+  const isNode = typeof process !== 'undefined' && process.versions?.node
+  const hasVertexFile = isNode && GOOGLE_APPLICATION_CREDENTIALS
+  if (hasVertexFile) return
+  if (!GEMINI_API_KEY) {
+    const hint = isNode
+      ? 'Set GOOGLE_APPLICATION_CREDENTIALS (path to service_account.json) in .env for Vertex AI. In the browser, set VITE_GEMINI_API_KEY (Google AI Studio).'
+      : 'In the browser, set VITE_GEMINI_API_KEY in .env (get a key from https://aistudio.google.com/apikey). For service account (Vertex), run evals from the CLI with --api_gemini.'
+    throw new Error(`Gemini config missing. ${hint}`)
+  }
+}
+
+/** Llama via Vertex AI: Node only, requires GOOGLE_APPLICATION_CREDENTIALS and LLAMA_PROJECT_ID (or VITE_LLAMA_*). */
+function requireLlamaEnv() {
+  const isNode = typeof process !== 'undefined' && process.versions?.node
+  if (!isNode) {
+    throw new Error('Llama provider is only available in Node (CLI). Set GOOGLE_APPLICATION_CREDENTIALS and LLAMA_PROJECT_ID, then run evals with --api_llama.')
+  }
+  if (!GOOGLE_APPLICATION_CREDENTIALS) {
+    throw new Error('Llama Vertex: set GOOGLE_APPLICATION_CREDENTIALS=path/to/service_account.json in .env')
+  }
+  if (!LLAMA_PROJECT_ID) {
+    throw new Error('Llama Vertex: set LLAMA_PROJECT_ID or VITE_LLAMA_PROJECT_ID in .env')
+  }
+}
+
+/** Require env for the currently selected provider. */
+function requireCurrentProviderEnv() {
+  if (apiProvider === 'gemini') requireGeminiEnv()
+  else if (apiProvider === 'llama') requireLlamaEnv()
+  else requireAzureEnv()
+}
 
 // Generation defaults
 const DEFAULT_MAX_COMPLETION_TOKENS = 5000
 const DEFAULT_TEMPERATURE = 0.7
 const DEFAULT_TOP_P = 0.9
 
-const REQUIRED_ENV = ['VITE_AZURE_ENDPOINT', 'VITE_AZURE_API_KEY', 'VITE_AZURE_DEPLOYMENT', 'VITE_AZURE_API_VERSION']
-function requireAzureEnv() {
-  if (!AZURE_ENDPOINT || !AZURE_API_KEY || !AZURE_DEPLOYMENT || !AZURE_API_VERSION) {
-    throw new Error(
-      `Azure OpenAI config missing. Set in .env: ${REQUIRED_ENV.join(', ')}`
-    )
-  }
-}
+const RATE_LIMIT_MAX_RETRIES = 10
+const DELAY_BETWEEN_CALLS_MS = 800
 
-const RATE_LIMIT_MAX_RETRIES = 5
-const DELAY_BETWEEN_CALLS_MS = 2000
-const REQUEST_TIMEOUT_MS = 120000
+// Allow much longer timeouts for large prompts when running via Node/CLI (human data, evals).
+const IS_NODE_ENV = typeof process !== 'undefined' && process.versions?.node
+const REQUEST_TIMEOUT_MS = IS_NODE_ENV ? 600000 : 120000
+
+/** Minimum wait (seconds) when API says "retry after X" — use at least this so we don't retry too soon. */
+const RATE_LIMIT_MIN_WAIT_SEC = 30
+/** Default wait (seconds) when rate limited but no "retry after" in message. */
+const RATE_LIMIT_DEFAULT_WAIT_SEC = 35
 
 function isRateLimitError(err) {
   const msg = (err?.message || '').toLowerCase()
-  return msg.includes('rate limit') || msg.includes('exceeded') || msg.includes('429')
+  return msg.includes('rate limit') || msg.includes('token rate limit') || msg.includes('exceeded') || msg.includes('429')
 }
 
 function isTimeoutError(err) {
@@ -47,9 +135,15 @@ function isNetworkError(err) {
   return msg.includes('failed to fetch') || msg.includes('network') || msg.includes('socket') || msg.includes('connection')
 }
 
+/** Azure content filter / content management policy — prompt or response was blocked. */
+function isContentFilterError(err) {
+  const msg = (err?.message || '').toLowerCase()
+  return msg.includes('content management policy') || msg.includes('content filter') || msg.includes('filtered due to')
+}
+
 function parseRetryAfterSeconds(err) {
   const match = (err?.message || '').match(/retry after (\d+) seconds/i)
-  return match ? Math.max(parseInt(match[1], 10), 8) : null
+  return match ? Math.max(parseInt(match[1], 10), RATE_LIMIT_MIN_WAIT_SEC) : null
 }
 
 /** Wait DELAY_BETWEEN_CALLS_MS, run fn(); on rate limit, timeout, or network error, wait and retry up to RATE_LIMIT_MAX_RETRIES times. */
@@ -63,7 +157,8 @@ async function withRetryOnRateLimit(fn) {
       lastErr = err
       const retryable = isRateLimitError(err) || isTimeoutError(err) || isNetworkError(err)
       if (attempt < RATE_LIMIT_MAX_RETRIES && retryable) {
-        const sec = isRateLimitError(err) ? (parseRetryAfterSeconds(err) ?? 8) : 10
+        const rawSec = isRateLimitError(err) ? (parseRetryAfterSeconds(err) ?? RATE_LIMIT_DEFAULT_WAIT_SEC) : 15
+        const sec = isRateLimitError(err) ? Math.max(rawSec, RATE_LIMIT_MIN_WAIT_SEC) : rawSec
         const waitMs = sec * 1000
         const reason = isTimeoutError(err) ? 'Request timeout' : isNetworkError(err) ? 'Network/socket error' : 'Rate limited'
         console.warn(`${reason}. Waiting ${sec}s before retry (${attempt + 1}/${RATE_LIMIT_MAX_RETRIES})...`)
@@ -230,10 +325,7 @@ function buildMentalModelPreamble(useOldModel, mentalModel) {
 }
 
 export const sendMessageToLLM = async (message, conversationHistory = [], context = {}) => {
-  requireAzureEnv()
-
-  // Build the API URL
-  const apiUrl = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`
+  requireCurrentProviderEnv()
 
   const { useOldModel = false, mentalModel = null } = context
   const preamble = buildMentalModelPreamble(useOldModel, mentalModel)
@@ -241,67 +333,30 @@ export const sendMessageToLLM = async (message, conversationHistory = [], contex
     ? preamble + '\n\nRespond to the user. Use the mental model above to shape your tone and structure; do not restate it explicitly.'
     : 'You are a helpful assistant.'
 
-  // Convert conversation history to Azure format
   const messages = [
-    {
-      role: 'system',
-      content: systemContent,
-    },
-    ...conversationHistory.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    })),
-    {
-      role: 'user',
-      content: message
-    }
+    { role: 'system', content: systemContent },
+    ...conversationHistory.map(msg => ({ role: msg.role, content: msg.content })),
+    { role: 'user', content: message }
   ]
 
   console.log('[API sendMessageToLLM] system:', systemContent)
   console.log('[API sendMessageToLLM] messages (full):', messages)
 
   try {
-    const response = await fetchWithTimeout(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': AZURE_API_KEY,
-      },
-      body: JSON.stringify({
-        messages: messages,
-        max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
-        temperature: DEFAULT_TEMPERATURE,
-        top_p: DEFAULT_TOP_P,
-        model: AZURE_DEPLOYMENT,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
-      throw new Error(
-        errorData.error?.message || 
-        `API request failed with status ${response.status}`
-      )
-    }
-
-    const data = await response.json()
-    return data.choices[0].message.content
+    return await chatCompletion(messages)
   } catch (error) {
-    console.error('Azure OpenAI API error:', error)
+    console.error('API error:', error)
     throw error
   }
 }
 
 export const inferUncertainAssumptions = async (conversationHistory = []) => {
-  requireAzureEnv()
+  requireCurrentProviderEnv()
 
   // Ensure we have conversation content
   if (!conversationHistory || conversationHistory.length === 0) {
     return { assumptions: [] }
   }
-
-  // Build the API URL
-  const apiUrl = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`
 
   // Build conversation text using exact same approach as Python code (build_history_text)
   const buildHistoryText = (messages) => {
@@ -350,43 +405,15 @@ Rules:
 - Output JSON only.`
 
   const messages = [
-    {
-      role: 'system',
-      content: systemMsg
-    },
-    {
-      role: 'user',
-      content: userMsg
-    }
+    { role: 'system', content: systemMsg },
+    { role: 'user', content: userMsg }
   ]
 
   console.log('[API inferUncertainAssumptions] system:', systemMsg)
   console.log('[API inferUncertainAssumptions] user:', userMsg)
 
   try {
-    const response = await fetchWithTimeout(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': AZURE_API_KEY,
-      },
-      body: JSON.stringify({
-        messages: messages,
-        max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
-        model: AZURE_DEPLOYMENT,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
-      throw new Error(
-        errorData.error?.message || 
-        `API request failed with status ${response.status}`
-      )
-    }
-
-    const data = await response.json()
-    const responseText = data.choices[0].message.content
+    const responseText = await chatCompletion(messages)
 
     // Parse JSON (exact same as Python: json.loads(resp.output_text))
     const parsed = JSON.parse(responseText)
@@ -419,7 +446,7 @@ Rules:
 
 // OLD MENTAL MODEL (Sycophancy + Assumption Model) - kept for toggle
 export const inferMentalModelOld = async (userMessage) => {
-  requireAzureEnv()
+  requireCurrentProviderEnv()
 
   // Default mental model (from Python code)
   const DEFAULT_MM = {
@@ -433,9 +460,6 @@ export const inferMentalModelOld = async (userMessage) => {
     informativeness: 0.7,
     assistant_role: "Neutral assistant",
   }
-
-  // Build the API URL
-  const apiUrl = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`
 
   // Exact prompts from Python code
   const systemMsg = (
@@ -475,29 +499,7 @@ Output STRICT JSON only.`
   console.log('[API inferMentalModelOld] user:', userMsg)
 
   try {
-    const response = await fetchWithTimeout(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': AZURE_API_KEY,
-      },
-      body: JSON.stringify({
-        messages: messages,
-        max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
-        model: AZURE_DEPLOYMENT,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
-      throw new Error(
-        errorData.error?.message || 
-        `API request failed with status ${response.status}`
-      )
-    }
-
-    const data = await response.json()
-    const responseText = data.choices[0].message.content
+    const responseText = await chatCompletion(messages)
 
     // Parse JSON (exact same as Python: json.loads(resp.output_text))
     const mm = JSON.parse(responseText)
@@ -522,7 +524,7 @@ const CONVO_HISTORY_LAST_N_MESSAGES = 3
 
 // NEW MENTAL MODEL (TurnState + Person Perception)
 export const inferMentalModel = async (userMessage, turnId, memory = { turn_index: [], situation_log: {} }, conversationHistory = []) => {
-  requireAzureEnv()
+  requireCurrentProviderEnv()
 
   // Default mental model structure (matches API response: person_perception + memory)
   const DEFAULT_MM = {
@@ -573,9 +575,6 @@ export const inferMentalModel = async (userMessage, turnId, memory = { turn_inde
       ]
     }
   }
-
-  // Build the API URL
-  const apiUrl = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`
 
   // Build memory text: full situation_log + only the previous turn's person_perception (prompt stays short). Full turn_index is still merged and stored.
   const memoryText = (() => {
@@ -685,29 +684,8 @@ Return the JSON for turn ${turnId} with behavior.turn_id and behavior.text set t
   console.log('[API inferMentalModel] user:', userMsg)
 
   try {
-    const response = await fetchWithTimeout(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': AZURE_API_KEY,
-      },
-      body: JSON.stringify({
-        messages: messages,
-        max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
-        model: AZURE_DEPLOYMENT,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
-      throw new Error(
-        errorData.error?.message || 
-        `API request failed with status ${response.status}`
-      )
-    }
-
-    const data = await response.json()
-    const jsonText = stripJsonFences(data.choices[0].message.content)
+    const content = await chatCompletion(messages)
+    const jsonText = stripJsonFences(content)
     const mm = JSON.parse(jsonText)
 
     const raw = mm.person_perception
@@ -741,23 +719,30 @@ Return the JSON for turn ${turnId} with behavior.turn_id and behavior.text set t
   }
 }
 
+/** One completion call with a single user message; returns content string. */
+async function completionWithUserMessage(prompt) {
+  return chatCompletion([{ role: 'user', content: prompt }])
+}
+
 /**
- * Single-call flow for support / induct / structured: one prompt with conversation + User A says + mental model instructions + JSON + RESPONSE.
- * Returns { mentalModel, response }.
+ * Single chat completion that routes to Azure (gpt-4o) or Gemini based on apiProvider.
+ * messages: [{ role: 'system'|'user'|'assistant', content: string }, ...]
+ * Returns the assistant reply content string.
  */
-export const sendMessageWithInlineMentalModel = async (conversationHistory, newUserText, modelType) => {
+async function chatCompletion(messages) {
+  requireCurrentProviderEnv()
+  if (apiProvider === 'gemini') {
+    return chatCompletionGemini(messages)
+  }
+  if (apiProvider === 'llama') {
+    return chatCompletionLlamaVertex(messages)
+  }
+  return chatCompletionAzure(messages)
+}
+
+async function chatCompletionAzure(messages) {
   requireAzureEnv()
   const apiUrl = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`
-
-  const historyStr = conversationHistory.length
-    ? conversationHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
-    : ''
-  const prompt = buildPromptWithHistory(historyStr, newUserText, modelType)
-
-  const messages = [
-    { role: 'user', content: prompt }
-  ]
-
   const response = await fetchWithTimeout(apiUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'api-key': AZURE_API_KEY },
@@ -769,23 +754,612 @@ export const sendMessageWithInlineMentalModel = async (conversationHistory, newU
       model: AZURE_DEPLOYMENT,
     }),
   })
-
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}))
     throw new Error(errorData.error?.message || `API request failed with status ${response.status}`)
   }
-
   const data = await response.json()
-  const content = data.choices?.[0]?.message?.content ?? ''
+  return data.choices?.[0]?.message?.content ?? ''
+}
+
+async function chatCompletionGemini(messages) {
+  const isNode = typeof process !== 'undefined' && process.versions?.node
+  const useVertex = isNode && GOOGLE_APPLICATION_CREDENTIALS
+  if (useVertex) {
+    return chatCompletionGeminiVertex(messages)
+  }
+  requireGeminiEnv()
+  let systemInstruction = ''
+  const chatMessages = []
+  for (const m of messages) {
+    if (m.role === 'system') {
+      systemInstruction = (systemInstruction ? systemInstruction + '\n\n' : '') + (m.content || '')
+    } else {
+      chatMessages.push({ role: m.role === 'assistant' ? 'model' : 'user', content: m.content || '' })
+    }
+  }
+  const contents = []
+  for (const m of chatMessages) {
+    contents.push({ role: m.role, parts: [{ text: m.content }] })
+  }
+  const body = {
+    contents,
+    generationConfig: {
+      maxOutputTokens: DEFAULT_MAX_COMPLETION_TOKENS,
+      temperature: DEFAULT_TEMPERATURE,
+      topP: DEFAULT_TOP_P,
+    },
+  }
+  if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}))
+    throw new Error(errorData.error?.message || `Gemini API failed: ${response.status}`)
+  }
+  const data = await response.json()
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+  if (text == null) throw new Error('Gemini response missing text')
+  return text
+}
+
+/**
+ * Gemini via Vertex AI (Node only). Uses GOOGLE_APPLICATION_CREDENTIALS path to service-account JSON.
+ * Project ID from VITE_GEMINI_PROJECT_ID / GEMINI_PROJECT_ID or from the JSON file.
+ */
+async function chatCompletionGeminiVertex(messages) {
+  const { readFileSync } = await import('fs')
+  const { GoogleAuth } = await import('google-auth-library')
+  const keyPath = GOOGLE_APPLICATION_CREDENTIALS
+  if (!keyPath) {
+    throw new Error('Gemini Vertex: set GOOGLE_APPLICATION_CREDENTIALS=path/to/service_account.json in .env')
+  }
+
+  let projectId = GEMINI_PROJECT_ID
+  if (!projectId) {
+    try {
+      const keyContent = readFileSync(keyPath, 'utf8')
+      const keyJson = JSON.parse(keyContent)
+      projectId = keyJson.project_id || ''
+    } catch (e) {
+      throw new Error(`Failed to read service account from ${keyPath}: ${e.message}. Set VITE_GEMINI_PROJECT_ID in .env`)
+    }
+  }
+  if (!projectId) throw new Error('Gemini Vertex: set VITE_GEMINI_PROJECT_ID in .env or ensure service account JSON has project_id')
+
+  // Match Python: scope https://www.googleapis.com/auth/cloud-platform
+  const auth = new GoogleAuth({
+    keyFilename: keyPath,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  })
+  const client = await auth.getClient()
+  const token = await client.getAccessToken()
+  if (!token.token) throw new Error('Failed to get Vertex AI access token')
+
+  let systemInstruction = ''
+  const chatMessages = []
+  for (const m of messages) {
+    if (m.role === 'system') {
+      systemInstruction = (systemInstruction ? systemInstruction + '\n\n' : '') + (m.content || '')
+    } else {
+      chatMessages.push({ role: m.role === 'assistant' ? 'model' : 'user', content: m.content || '' })
+    }
+  }
+  const contents = chatMessages.map(m => ({ role: m.role, parts: [{ text: m.content }] }))
+  const body = {
+    contents,
+    generationConfig: {
+      maxOutputTokens: DEFAULT_MAX_COMPLETION_TOKENS,
+      temperature: DEFAULT_TEMPERATURE,
+      topP: DEFAULT_TOP_P,
+    },
+  }
+  if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] }
+
+  const url = `https://${GEMINI_LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${GEMINI_LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token.token}`,
+    },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const errText = await response.text()
+    let errMsg = `Vertex Gemini API failed: ${response.status}`
+    try {
+      const errJson = JSON.parse(errText)
+      if (errJson.error?.message) errMsg = errJson.error.message
+    } catch (_) {}
+    throw new Error(errMsg)
+  }
+  const data = await response.json()
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+  if (text == null) throw new Error('Vertex Gemini response missing text')
+  return text
+}
+
+/**
+ * Llama via Vertex AI (Node only). Uses same GOOGLE_APPLICATION_CREDENTIALS as Gemini Vertex.
+ * Endpoint: Vertex AI OpenAPI-style chat/completions (OpenAI-compatible response).
+ * Env: LLAMA_PROJECT_ID, LLAMA_LOCATION (default us-central1), LLAMA_MODEL_ID (e.g. meta/llama-3.3-70b-instruct-maas).
+ */
+async function chatCompletionLlamaVertex(messages) {
+  const { readFileSync } = await import('fs')
+  const { GoogleAuth } = await import('google-auth-library')
+  const keyPath = GOOGLE_APPLICATION_CREDENTIALS
+  if (!keyPath) {
+    throw new Error('Llama Vertex: set GOOGLE_APPLICATION_CREDENTIALS=path/to/service_account.json in .env')
+  }
+
+  let projectId = LLAMA_PROJECT_ID
+  if (!projectId) {
+    try {
+      const keyContent = readFileSync(keyPath, 'utf8')
+      const keyJson = JSON.parse(keyContent)
+      projectId = keyJson.project_id || ''
+    } catch (e) {
+      throw new Error(`Failed to read service account from ${keyPath}: ${e.message}. Set LLAMA_PROJECT_ID in .env`)
+    }
+  }
+  if (!projectId) throw new Error('Llama Vertex: set LLAMA_PROJECT_ID or VITE_LLAMA_PROJECT_ID in .env')
+
+  const auth = new GoogleAuth({
+    keyFilename: keyPath,
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  })
+  const client = await auth.getClient()
+  const token = await client.getAccessToken()
+  if (!token.token) throw new Error('Failed to get Vertex AI access token for Llama')
+
+  // Vertex OpenAPI chat/completions expects OpenAI-style messages and returns choices[0].message.content
+  const payload = {
+    model: LLAMA_MODEL_ID,
+    messages: messages.map(m => ({ role: m.role, content: m.content || '' })),
+    max_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
+    temperature: DEFAULT_TEMPERATURE,
+  }
+
+  const url = `https://${LLAMA_LOCATION}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${LLAMA_LOCATION}/endpoints/openapi/chat/completions`
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token.token}`,
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const errText = await response.text()
+    let errMsg = `Vertex Llama API failed: ${response.status}`
+    try {
+      const errJson = JSON.parse(errText)
+      if (errJson.error?.message) errMsg = errJson.error.message
+    } catch (_) {}
+    throw new Error(errMsg)
+  }
+  const data = await response.json()
+  const text = data?.choices?.[0]?.message?.content
+  if (text == null) throw new Error('Vertex Llama response missing content')
+  return text
+}
+
+/** Build turnsWithPriors from flat conversationHistory and per-turn mental models. */
+function buildTurnsWithPriors(conversationHistory, priorMentalModelsByTurn) {
+  const turnsWithPriors = []
+  for (let i = 0; i + 1 < conversationHistory.length; i += 2) {
+    const u = conversationHistory[i]
+    const a = conversationHistory[i + 1]
+    if (u?.role === 'user' && a?.role === 'assistant') {
+      const turnIndex = turnsWithPriors.length
+      turnsWithPriors.push({
+        userMessage: typeof u.content === 'string' ? u.content : '',
+        assistantMessage: typeof a.content === 'string' ? a.content : '',
+        mentalModel: priorMentalModelsByTurn?.[turnIndex] ?? null
+      })
+    }
+  }
+  return turnsWithPriors
+}
+
+/**
+ * Single-call flow: one prompt with conversation + User A says + mental model instructions + JSON + RESPONSE.
+ * Returns { mentalModel, response }.
+ * priorMentalModelsByTurn: optional array of mental models (one per completed turn); when set, prior scores are shown after each turn in the conversation log.
+ */
+export const sendMessageWithInlineMentalModel = async (conversationHistory, newUserText, modelType, priorMentalModelsByTurn = null) => {
+  const historyStr = conversationHistory.length
+    ? conversationHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+    : ''
+  const turnsWithPriors = Array.isArray(priorMentalModelsByTurn) && priorMentalModelsByTurn.length > 0
+    ? buildTurnsWithPriors(conversationHistory, priorMentalModelsByTurn)
+    : null
+  if (turnsWithPriors?.length) {
+    console.log('[API] Prior (all past turns, scores only) in conversation log:\n', buildHistoryBlockWithPriors(turnsWithPriors))
+  }
+  const prompt = buildPromptWithHistory(historyStr, newUserText, modelType, turnsWithPriors)
+  console.log('[API] Single call: mental model + response', { modelType, promptLength: prompt.length })
+  console.log('[API] Single call — full prompt (with conversation + user message):\n', prompt)
+  const content = await completionWithUserMessage(prompt)
   return parseSingleCallResponse(content)
+}
+
+/**
+ * One-call flow: mental model only (used when separate mode uses pre-existing convos from convos_to_use).
+ * Returns { mentalModel }.
+ * priorMentalModelsByTurn: optional array of mental models (one per completed turn); when set, prior scores are shown after each turn in the conversation log.
+ */
+export const sendMessageMentalModelOnly = async (conversationHistory, newUserText, modelType, priorMentalModelsByTurn = null) => {
+  const historyStr = conversationHistory.length
+    ? conversationHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+    : ''
+  const turnsWithPriors = Array.isArray(priorMentalModelsByTurn) && priorMentalModelsByTurn.length > 0
+    ? buildTurnsWithPriors(conversationHistory, priorMentalModelsByTurn)
+    : null
+  if (turnsWithPriors?.length) {
+    console.log('[API] Prior (all past turns, scores only) in conversation log:\n', buildHistoryBlockWithPriors(turnsWithPriors))
+  }
+  const prompt = buildMentalModelOnlyPrompt(historyStr, newUserText, modelType, turnsWithPriors)
+  console.log('[API] Mental model only (convos_to_use mode)', { modelType, promptLength: prompt.length })
+  const content = await completionWithUserMessage(prompt)
+  const mentalModel = parseMentalModelOnlyResponse(content)
+  return { mentalModel }
+}
+
+/**
+ * Separate two-call flow: call 1 = mental model only (JSON), call 2 = response only (RESPONSE: ...). Calls do not affect each other.
+ * Returns { mentalModel, response }. Saves convo JSON the same way as single-call.
+ * When using pre-existing convos (run_simulations with useSeparateMentalModelResponse), only the mental-model call is made; user/assistant text comes from convos_to_use.
+ * priorMentalModelsByTurn: optional array of mental models (one per completed turn); when set, prior scores are shown after each turn in the conversation log.
+ */
+export const sendMessageSeparateMentalModelAndResponse = async (conversationHistory, newUserText, modelType, priorMentalModelsByTurn = null) => {
+  const historyStr = conversationHistory.length
+    ? conversationHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+    : ''
+
+  const turnsWithPriors = Array.isArray(priorMentalModelsByTurn) && priorMentalModelsByTurn.length > 0
+    ? buildTurnsWithPriors(conversationHistory, priorMentalModelsByTurn)
+    : null
+  if (turnsWithPriors?.length) {
+    console.log('[API] Prior (all past turns, scores only) in conversation log:\n', buildHistoryBlockWithPriors(turnsWithPriors))
+  }
+  const prompt1 = buildMentalModelOnlyPrompt(historyStr, newUserText, modelType, turnsWithPriors)
+  console.log('[API] Separate mode: call 1 (mental model only)', { modelType, promptLength: prompt1.length })
+  console.log('[API] Separate call 1 — full prompt (mental model only, with conversation + user message):\n', prompt1)
+  const content1 = await completionWithUserMessage(prompt1)
+  const mentalModel = parseMentalModelOnlyResponse(content1)
+
+  const prompt2 = buildResponseOnlyPrompt(historyStr, newUserText)
+  console.log('[API] Separate mode: call 2 (response only)', { modelType, promptLength: prompt2.length })
+  console.log('[API] Separate call 2 — full prompt (response only, with conversation + user message):\n', prompt2)
+  const content2 = await completionWithUserMessage(prompt2)
+  const response = parseResponseOnlyContent(content2)
+
+  return { mentalModel, response }
+}
+
+/**
+ * Response-only call (no mental model). Used for --generate_convo to produce assistant replies.
+ */
+export const sendResponseOnly = async (conversationHistory, newUserText) => {
+  const historyStr = conversationHistory.length
+    ? conversationHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+    : ''
+  const prompt = buildResponseOnlyPrompt(historyStr, newUserText)
+  const content = await completionWithUserMessage(prompt)
+  return parseResponseOnlyContent(content)
+}
+
+/** Context window (input + output). Output reserved for mental-model JSON. */
+const CONTEXT_WINDOW_MAX_TOKENS = 128000
+const OUTPUT_RESERVE_TOKENS = 5000
+/** Generous estimate: ~4 chars per token (100 tokens ~ 75 words). */
+const CHARS_PER_TOKEN = 4
+const MENTAL_MODEL_PROMPT_OVERHEAD_TOKENS = 4000
+
+/** Estimate token count from character length. */
+function estimateTokens(str) {
+  if (!str || typeof str !== 'string') return 0
+  return Math.ceil(str.length / CHARS_PER_TOKEN)
+}
+
+/** Max tokens allowed for conversation + current user message (so total input + output <= CONTEXT_WINDOW_MAX_TOKENS). */
+const MAX_INPUT_ESTIMATE_TOKENS = CONTEXT_WINDOW_MAX_TOKENS - OUTPUT_RESERVE_TOKENS - MENTAL_MODEL_PROMPT_OVERHEAD_TOKENS
+
+/** Base URL for pre-existing conversations (served by Vite plugin from data/seperate_call/convos_to_use). */
+const CONVOS_TO_USE_BASE = '/data/seperate_call/convos_to_use'
+
+/**
+ * Load a pre-existing conversation for (category, prompt_id). Used when separate mental model + response is checked:
+ * user/assistant messages come from this file; only one GPT call per turn (mental model).
+ * Returns { turns: [{ turnIndex, userMessage, assistantMessage }, ...], ... } or null if fetch fails.
+ */
+export const loadConvoFromConvosToUse = async (category, promptId) => {
+  const url = `${CONVOS_TO_USE_BASE}/${category}/${promptId}.json`
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!data?.turns?.length) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+// --- Human data analysis (e.g. h01.json: meta + messages) ---
+
+const HUMAN_DATA_BASE = '/data'
+
+/**
+ * Load human conversation JSON from /data path (e.g. do_not_upload/h01.json).
+ * Expected shape: { meta: { ... }, messages: [ { role: 'user'|'assistant', content: string }, ... ] }.
+ */
+export const loadHumanDataJson = async (dataPath) => {
+  const url = dataPath.startsWith('/') ? `${HUMAN_DATA_BASE}${dataPath}` : `${HUMAN_DATA_BASE}/${dataPath}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Failed to load human data: ${res.status} ${url}`)
+  const data = await res.json()
+  if (!data?.messages?.length) throw new Error('Human data has no messages array')
+  return data
+}
+
+/**
+ * Convert messages to turns: [ { turnIndex, userMessage, assistantMessage }, ... ].
+ * Consecutive user messages are merged (joined with '\n\n') and paired with the next assistant message.
+ */
+function messagesToTurns(messages) {
+  const turns = []
+  let i = 0
+  while (i < messages.length) {
+    const userContents = []
+    while (i < messages.length && messages[i]?.role === 'user') {
+      const content = messages[i].content
+      userContents.push(typeof content === 'string' ? content : '')
+      i++
+    }
+    if (userContents.length === 0) {
+      i++
+      continue
+    }
+    const userMessage = userContents.join('\n\n')
+    if (i >= messages.length || messages[i]?.role !== 'assistant') {
+      continue
+    }
+    const assistantMessage = typeof messages[i].content === 'string' ? messages[i].content : ''
+    turns.push({
+      turnIndex: turns.length,
+      userMessage,
+      assistantMessage
+    })
+    i++
+  }
+  return turns
+}
+
+/**
+ * Trim conversation history (array of { role, content }) so that estimated tokens for
+ * historyStr + newUserText is <= maxTokens. Mutates by removing from the start.
+ */
+function trimHistoryToTokenLimit(history, newUserText, maxTokens) {
+  const newUserEst = estimateTokens(newUserText)
+  let historyStr = history.length
+    ? history.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+    : ''
+  while (history.length > 0 && estimateTokens(historyStr) + newUserEst > maxTokens) {
+    history.shift()
+    history.shift()
+    historyStr = history.length
+      ? history.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+      : ''
+  }
+}
+
+/**
+ * Return true if this turn's mentalModel is empty or missing required content for human eval.
+ * induct: needs mental_model.beliefs; types_support: needs mental_model.support_seeking.
+ */
+export function isEmptyMentalModel(mentalModel, mentalModelType) {
+  if (!mentalModel || typeof mentalModel !== 'object') return true
+  const mm = mentalModel.mental_model ?? mentalModel.mentalModel
+  if (!mm || typeof mm !== 'object') return true
+  if (mentalModelType === 'induct') return !mm.beliefs || typeof mm.beliefs !== 'object'
+  if (mentalModelType === 'types_support') return !mm.support_seeking || typeof mm.support_seeking !== 'object'
+  return true
+}
+
+/**
+ * Backfill empty mental models in an existing human-eval result (e.g. from runHumanDataAnalysis).
+ * result: { meta, turns } with turns[].{ turnIndex, userMessage, assistantMessage, mentalModel }.
+ * For each turn where mentalModel is empty, calls sendMessageMentalModelOnly and updates the turn.
+ * Uses same context trimming and prior logic as runHumanDataAnalysis.
+ * Returns updated { meta, turns } (mutates result.turns in place and updates meta.last_updated).
+ */
+export const backfillEmptyMentalModelsForHumanResult = async ({
+  result,
+  mentalModelType = 'induct',
+  onProgress = null,
+  onTurn = null
+} = {}) => {
+  requireCurrentProviderEnv()
+  if (!['induct', 'types_support'].includes(mentalModelType)) {
+    throw new Error('Backfill only supports mentalModelType: induct or types_support')
+  }
+  const turns = result?.turns
+  if (!Array.isArray(turns) || !turns.length) return result
+
+  const emptyIndices = turns
+    .map((t, i) => (isEmptyMentalModel(t.mentalModel, mentalModelType) ? i : -1))
+    .filter(i => i >= 0)
+  if (emptyIndices.length === 0) return result
+
+  for (const t of emptyIndices) {
+    const turn = turns[t]
+    const history = []
+    for (let i = 0; i < t; i++) {
+      history.push({ role: 'user', content: turns[i].userMessage })
+      history.push({ role: 'assistant', content: turns[i].assistantMessage })
+    }
+    trimHistoryToTokenLimit(history, turn.userMessage, MAX_INPUT_ESTIMATE_TOKENS)
+
+    // Human data: no prior mental model in the prompt, just conversation up to this point
+    const apiResult = await withRetryOnRateLimit(() =>
+      sendMessageMentalModelOnly(history, turn.userMessage, mentalModelType, null)
+    )
+    turn.mentalModel = apiResult.mentalModel ?? {}
+    result.meta = result.meta || {}
+    result.meta.last_updated = new Date().toISOString()
+    result.meta.api_model = getApiProvider()
+    if (onTurn) onTurn(t, turn.userMessage, turn.assistantMessage, turn.mentalModel)
+    if (onProgress) onProgress(t, turns.length, emptyIndices.length)
+  }
+  return result
+}
+
+/**
+ * Run mental-model analysis over human conversation data (e.g. h01.json).
+ * - Fetches JSON from dataPath (under /data), converts messages to turns (user/assistant pairs).
+ * - Respects 128k context: trims earlier messages so prompt + 5k output <= 128k (estimate ~4 chars/token).
+ * - One API call per turn (mental model only). Supports induct and types_support.
+ * - Saves checkpoint every 50 turns (and at end); metadata has turns_recorded_up_to (single number) for resume.
+ * - downloadWhenDone: download as ZIP (runId/human/<sourceId>.json).
+ * dataPath: e.g. 'do_not_upload/h01.json'
+ * mentalModelType: 'induct' | 'types_support'
+ * existingResult: optional { meta: { turns_recorded_up_to, ... }, turns: [...] } to resume from.
+ * rawData: optional pre-loaded { meta, messages } (CLI: read from disk and pass); skips loadHumanDataJson.
+ * runId: optional (CLI passes e.g. filename_induct_run_1).
+ * onSaveCheckpoint: optional (result) => void; when set, called after each checkpoint and at end instead of ZIP download.
+ */
+const HUMAN_DATA_CHECKPOINT_EVERY_N_TURNS = 50
+
+export const runHumanDataAnalysis = async ({
+  dataPath = 'do_not_upload/h01.json',
+  mentalModelType = 'induct',
+  usePrior = false,
+  existingResult = null,
+  rawData = null,
+  runId: providedRunId = null,
+  onProgress = null,
+  onTurn = null,
+  onSaveCheckpoint = null,
+  downloadWhenDone = true
+} = {}) => {
+  requireCurrentProviderEnv()
+  if (!['induct', 'types_support'].includes(mentalModelType)) {
+    throw new Error('Human data analysis only supports mentalModelType: induct or types_support')
+  }
+
+  const raw = rawData ?? await loadHumanDataJson(dataPath)
+  const initialAssistantHistory = []
+  if (Array.isArray(raw.messages) && raw.messages.length) {
+    for (let i = 0; i < raw.messages.length; i++) {
+      const m = raw.messages[i]
+      if (m?.role === 'assistant') {
+        initialAssistantHistory.push({ role: 'assistant', content: typeof m.content === 'string' ? m.content : '' })
+      } else {
+        break
+      }
+    }
+  }
+  const turns = messagesToTurns(raw.messages)
+  const sourceId = dataPath.replace(/\.json$/i, '').split('/').pop() || 'human'
+  const runId = providedRunId ?? `human_${sourceId}_${nextRunId('human_analysis')}`
+
+  const byTurn = new Map()
+  if (existingResult?.turns?.length) {
+    for (const t of existingResult.turns) {
+      if (t.turnIndex != null) byTurn.set(t.turnIndex, t)
+    }
+  }
+
+  const meta = {
+    source: dataPath,
+    sourceId,
+    mentalModelType,
+    api_model: getApiProvider(),
+    use_prior: !!usePrior,
+    message_count: raw.meta?.message_count ?? raw.messages.length,
+    turns_recorded_up_to: -1,
+    last_updated: null
+  }
+
+  for (let t = 0; t < turns.length; t++) {
+    if (byTurn.has(t)) {
+      const existingTurn = byTurn.get(t)
+      meta.turns_recorded_up_to = t
+      if (onTurn) onTurn(runId, sourceId, t, existingTurn.userMessage, existingTurn.assistantMessage, existingTurn.mentalModel)
+      if (onProgress) onProgress(runId, sourceId, t, turns.length)
+      continue
+    }
+
+    const { userMessage, assistantMessage } = turns[t]
+    const history = initialAssistantHistory.length ? [...initialAssistantHistory] : []
+    for (let i = 0; i < t; i++) {
+      history.push({ role: 'user', content: turns[i].userMessage })
+      history.push({ role: 'assistant', content: turns[i].assistantMessage })
+    }
+    trimHistoryToTokenLimit(history, userMessage, MAX_INPUT_ESTIMATE_TOKENS)
+
+    const priorMentalModelsByTurn = usePrior ? Array.from({ length: t }, (_, i) => byTurn.get(i)?.mentalModel ?? null) : null
+    const result = await withRetryOnRateLimit(() =>
+      sendMessageMentalModelOnly(history, userMessage, mentalModelType, priorMentalModelsByTurn)
+    )
+    const mentalModel = result.mentalModel
+
+    const turnRecord = { turnIndex: t, userMessage, assistantMessage, mentalModel }
+    byTurn.set(t, turnRecord)
+    meta.turns_recorded_up_to = t
+    meta.last_updated = new Date().toISOString()
+
+    if (onTurn) onTurn(runId, sourceId, t, userMessage, assistantMessage, mentalModel)
+    if (onProgress) onProgress(runId, sourceId, t, turns.length)
+
+    const outTurns = Array.from(byTurn.entries()).sort((a, b) => a[0] - b[0]).map(([, tr]) => tr)
+    if (onSaveCheckpoint) {
+      onSaveCheckpoint({ runId, meta: { ...meta }, turns: outTurns })
+    } else {
+      const shouldCheckpoint = (t + 1) % HUMAN_DATA_CHECKPOINT_EVERY_N_TURNS === 0
+      if (shouldCheckpoint) {
+        await downloadHumanAnalysisAsZip({ runId, sourceId, meta: { ...meta }, turns: outTurns, downloadFilename: `${runId}_checkpoint.zip` })
+      }
+    }
+  }
+
+  const finalTurns = Array.from(byTurn.entries()).sort((a, b) => a[0] - b[0]).map(([, tr]) => tr)
+  if (onSaveCheckpoint) onSaveCheckpoint({ runId, meta, turns: finalTurns })
+  else if (downloadWhenDone) {
+    await downloadHumanAnalysisAsZip({ runId, sourceId, meta, turns: finalTurns })
+  }
+
+  return { runId, meta, turns: finalTurns }
+}
+
+/**
+ * Build a ZIP containing one file: runId/human/sourceId.json with { meta, turns } and trigger download.
+ */
+export const downloadHumanAnalysisAsZip = async ({ runId, sourceId, meta, turns, downloadFilename }) => {
+  const zip = new JSZip()
+  const runFolder = zip.folder(runId)
+  const humanFolder = runFolder.folder('human')
+  humanFolder.file(`${sourceId}.json`, JSON.stringify({ meta, turns }, null, 2))
+  const blob = await zip.generateAsync({ type: 'blob' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = downloadFilename ?? `${runId}.zip`
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
 // --- Eval: simulated conversations ---
 
 /** Generate next seeker (user) message given system prompt and conversation history. */
 export const generateSeekerMessage = async (systemPrompt, conversationHistory) => {
-  requireAzureEnv()
-  const apiUrl = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`
+  requireCurrentProviderEnv()
   const messages = [
     { role: 'system', content: systemPrompt },
     ...conversationHistory.map(m => ({ role: m.role, content: m.content })),
@@ -793,33 +1367,22 @@ export const generateSeekerMessage = async (systemPrompt, conversationHistory) =
   ]
   console.log('[API generateSeekerMessage] system:', systemPrompt)
   console.log('[API generateSeekerMessage] messages (full):', messages)
-  const response = await fetchWithTimeout(apiUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'api-key': AZURE_API_KEY },
-    body: JSON.stringify({
-      messages,
-      max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
-      temperature: DEFAULT_TEMPERATURE,
-      top_p: DEFAULT_TOP_P,
-      model: AZURE_DEPLOYMENT,
-    })
-  })
-  if (!response.ok) throw new Error(`Seeker API failed: ${response.status}`)
-  const data = await response.json()
-  return (data.choices?.[0]?.message?.content ?? '').trim()
+  const content = await chatCompletion(messages)
+  return (content ?? '').trim()
 }
 
 const EVAL_RUN_COUNT_KEY = 'perception_llm_eval_run_count'
 
-/** Next run id from a persisted count per mental model type: run001, run002, ... */
-function nextRunId(mentalModelType = 'person_perception') {
-  const key = `${EVAL_RUN_COUNT_KEY}_${mentalModelType}`
+/** Next run id from a persisted count per mental model type: run001, run002, ... In Node (no localStorage) returns run_<timestamp>. */
+export function nextRunId(mentalModelType = 'person_perception') {
   try {
+    if (typeof localStorage === 'undefined') return `run_${Date.now()}`
+    const key = `${EVAL_RUN_COUNT_KEY}_${mentalModelType}`
     const n = parseInt(localStorage.getItem(key) || '0', 10) + 1
     localStorage.setItem(key, String(n))
     return `run${String(n).padStart(3, '0')}`
   } catch {
-    return `run${String(Date.now()).slice(-6)}`
+    return `run_${Date.now()}`
   }
 }
 
@@ -864,24 +1427,30 @@ export const downloadRunAsZip = async ({ runId, scenarios, downloadFilename }) =
 
 /**
  * Run 30 × numTurns simulated conversations (seeker vs evaluated model), store mental model per turn.
- * mentalModelType: 'person_perception' | 'old_model' | 'support' | 'induct' | 'structured'. Run count is per type.
- * useOldModel: when mentalModelType is person_perception (false) or old_model (true); ignored for support/induct/structured.
+ * mentalModelType: 'person_perception' | 'support' | 'induct' | 'structured' | 'types_support'. Run count is per type.
+ * useSeparateMentalModelResponse: when true and mentalModelType is inline (support/induct/structured/types_support), use two independent calls (mental model only, then response only).
  * runId: when not provided, uses nextRunId(mentalModelType).
  * downloadWhenDone: if true, triggers a ZIP when run completes; saveAfterEachConvo (default true) saves after each scenario with filename runId_category_promptId.zip.
  * onScenarioStart(runId, category, promptId, categoryInjection, extraInjection), onTurn(...) for live UI.
  * startScenarioIndex: 0-based index to start from. Returns { runId, scenarios }. Pass existingRun to resume; optional onProgress, saveCheckpoint.
+ * getConvo: optional (category, promptId) => Promise<{ turns } | null> to load convos from disk (CLI); when set, used instead of loadConvoFromConvosToUse.
+ * onAfterScenario: optional (runId, scenarios) => void; called after each scenario (CLI can write to disk).
  */
 export const run_simulations = async ({
   mentalModelType = 'person_perception',
   useOldModel = false,
+  useSeparateMentalModelResponse = false,
+  usePrior = false,
   numTurns = 20,
   maxScenarios = null,
   startScenarioIndex = 0,
   runId: providedRunId,
   seed = 42,
+  getConvo = null,
   onProgress,
   onScenarioStart,
   onTurn,
+  onAfterScenario = null,
   existingRun = null,
   saveCheckpoint = null,
   downloadWhenDone = false,
@@ -902,10 +1471,30 @@ export const run_simulations = async ({
   for (let i = 0; i < taskList.length; i++) {
     const task = taskList[i]
     const key = `${task.category}/${task.prompt_id}`
+    try {
     const existing = scenarios[key]
     let turns = Array.isArray(existing) ? [...existing] : (existing?.turns ? [...existing.turns] : [])
     const startTurn = turns.length
-    if (startTurn >= numTurns) continue
+
+    const useInlineMentalModel = INLINE_MENTAL_MODEL_TYPES.includes(mentalModelType)
+    const usePreExistingConvo = useInlineMentalModel && useSeparateMentalModelResponse
+
+    let preExistingConvo = null
+    if (usePreExistingConvo) {
+      preExistingConvo = getConvo
+        ? await getConvo(task.category, task.prompt_id)
+        : await loadConvoFromConvosToUse(task.category, task.prompt_id)
+      if (!preExistingConvo) {
+        throw new Error(
+          `No pre-existing convo for ${task.category}/${task.prompt_id}. ${getConvo ? 'Check convo folder.' : 'Add data/seperate_call/convos_to_use/${task.category}/${task.prompt_id}.json'}`
+        )
+      }
+    }
+
+    const numTurnsEffective = usePreExistingConvo
+      ? Math.min(numTurns, preExistingConvo.turns.length)
+      : numTurns
+    if (startTurn >= numTurnsEffective) continue
 
     const globalScenarioNum = startScenarioIndex + i + 1
     const parts = [DEFAULT_SEEKER_PROMPT]
@@ -917,36 +1506,58 @@ export const run_simulations = async ({
     let history = []
     let memory = { turn_index: [] }
 
-    const useInlineMentalModel = INLINE_MENTAL_MODEL_TYPES.includes(mentalModelType)
-
-    for (let t = startTurn; t < numTurns; t++) {
-      const userMessage = t === 0
-        ? task.firstPrompt
-        : await withRetryOnRateLimit(() => generateSeekerMessage(systemPrompt, history))
+    for (let t = startTurn; t < numTurnsEffective; t++) {
       const turnId = `t${String(t).padStart(3, '0')}`
-
-      let mentalModel
+      let userMessage
       let assistantMessage
+      let mentalModel
 
-      if (useInlineMentalModel) {
+      if (usePreExistingConvo) {
+        const turnData = preExistingConvo.turns[t]
+        userMessage = turnData?.userMessage ?? ''
+        assistantMessage = turnData?.assistantMessage ?? ''
+        const priorMentalModelsByTurn = usePrior ? turns.slice(0, t).map(tr => tr.mentalModel) : null
+        console.log('[Eval] Separate mode (convos_to_use): one call (mental model only)', { mentalModelType, turn: t + 1 })
         const result = await withRetryOnRateLimit(() =>
-          sendMessageWithInlineMentalModel(history, userMessage, mentalModelType)
+          sendMessageMentalModelOnly(history, userMessage, mentalModelType, priorMentalModelsByTurn)
         )
         mentalModel = result.mentalModel
-        assistantMessage = result.response
       } else {
-        mentalModel = await withRetryOnRateLimit(() =>
-          useOldModel
-            ? inferMentalModelOld(userMessage)
-            : inferMentalModel(userMessage, turnId, memory, history)
-        )
-        if (!useOldModel && mentalModel?.memory) memory = mentalModel.memory
-        assistantMessage = await withRetryOnRateLimit(() =>
-          sendMessageToLLM(userMessage, history, { useOldModel, mentalModel })
-        )
+        userMessage = t === 0
+          ? task.firstPrompt
+          : await withRetryOnRateLimit(() => generateSeekerMessage(systemPrompt, history))
+
+        if (useInlineMentalModel) {
+          const priorMentalModelsByTurn = usePrior ? turns.slice(0, t).map(tr => tr.mentalModel) : null
+          if (useSeparateMentalModelResponse) {
+            console.log('[Eval] Separate mode: two calls (mental model, then response)', { mentalModelType, turn: t + 1 })
+            const result = await withRetryOnRateLimit(() =>
+              sendMessageSeparateMentalModelAndResponse(history, userMessage, mentalModelType, priorMentalModelsByTurn)
+            )
+            mentalModel = result.mentalModel
+            assistantMessage = result.response
+          } else {
+            console.log('[Eval] Single call: mental model + response', { mentalModelType, turn: t + 1 })
+            const result = await withRetryOnRateLimit(() =>
+              sendMessageWithInlineMentalModel(history, userMessage, mentalModelType, priorMentalModelsByTurn)
+            )
+            mentalModel = result.mentalModel
+            assistantMessage = result.response
+          }
+        } else {
+          mentalModel = await withRetryOnRateLimit(() =>
+            useOldModel
+              ? inferMentalModelOld(userMessage)
+              : inferMentalModel(userMessage, turnId, memory, history)
+          )
+          if (!useOldModel && mentalModel?.memory) memory = mentalModel.memory
+          assistantMessage = await withRetryOnRateLimit(() =>
+            sendMessageToLLM(userMessage, history, { useOldModel, mentalModel })
+          )
+        }
       }
 
-      console.log(`[Eval] ${runId} ${task.category}/${task.prompt_id} turn ${t + 1}/${numTurns}`, {
+      console.log(`[Eval] ${runId} ${task.category}/${task.prompt_id} turn ${t + 1}/${numTurnsEffective}`, {
         mentalModel,
         response: assistantMessage
       })
@@ -957,7 +1568,7 @@ export const run_simulations = async ({
       history.push({ role: 'user', content: userMessage }, { role: 'assistant', content: assistantMessage })
 
       if (saveCheckpoint) saveCheckpoint(runId, task.category, task.prompt_id, turns)
-      if (onProgress) onProgress(runId, task.category, task.prompt_id, t, numTurns, globalScenarioNum)
+      if (onProgress) onProgress(runId, task.category, task.prompt_id, t, numTurnsEffective, globalScenarioNum)
     }
 
     scenarios[key] = {
@@ -967,31 +1578,125 @@ export const run_simulations = async ({
         prompt_id: task.prompt_id,
         categoryInjection: task.categoryInjection || null,
         extraInjection: task.extraInjection || null,
+        api_model: getApiProvider(),
+        use_prior: !!usePrior,
       }
     }
 
-    if ((downloadWhenDone || saveAfterEachConvo) && Object.keys(scenarios).length > 0) {
+    if (onAfterScenario) onAfterScenario(runId, { ...scenarios })
+    if ((downloadWhenDone || saveAfterEachConvo) && Object.keys(scenarios).length > 0 && !onAfterScenario) {
       await downloadRunAsZip({
         runId,
         scenarios: { ...scenarios },
         downloadFilename: `${runId}_${task.category}_${task.prompt_id}.zip`
       })
     }
+    } catch (err) {
+      if (isContentFilterError(err)) {
+        console.warn(`[Eval] Skipping scenario ${task.category}/${task.prompt_id} due to content filter. Continuing.`, err.message)
+        scenarios[key] = {
+          turns: [],
+          metadata: {
+            category: task.category,
+            prompt_id: task.prompt_id,
+            categoryInjection: task.categoryInjection || null,
+            extraInjection: task.extraInjection || null,
+            api_model: getApiProvider(),
+            use_prior: !!usePrior,
+            content_filter_skipped: true,
+            error: err?.message || String(err)
+          }
+        }
+        if (onAfterScenario) onAfterScenario(runId, { ...scenarios })
+        continue
+      }
+      throw err
+    }
   }
 
-  if (downloadWhenDone && Object.keys(scenarios).length > 0) {
+  if (downloadWhenDone && !onAfterScenario && Object.keys(scenarios).length > 0) {
     await downloadRunAsZip({ runId, scenarios })
   }
   return { runId, scenarios }
 }
 
+/**
+ * Generate 30 × numTurns conversations (seeker + response only, no mental model).
+ * For use with --generate_convo; save to data/separate_call/convo_#/.
+ * Returns { scenarios } where each value is { turns, metadata } (turns have userMessage, assistantMessage only).
+ */
+export const runGenerateConvos = async ({
+  numTurns = 20,
+  seed = 42,
+  onProgress = null,
+  onScenarioStart = null,
+} = {}) => {
+  requireCurrentProviderEnv()
+  const scenarios = {}
+  let taskList = SCENARIOS.map((s, i) => ({
+    ...s,
+    firstPrompt: s.prompts[0],
+    categoryInjection: CATEGORY_INJECTIONS[s.category] ?? '',
+    extraInjection: INJECTION_BEHAVIORS[(seed + i) % INJECTION_BEHAVIORS.length]
+  }))
+
+  for (let i = 0; i < taskList.length; i++) {
+    const task = taskList[i]
+    const key = `${task.category}/${task.prompt_id}`
+    const parts = [DEFAULT_SEEKER_PROMPT]
+    if (task.categoryInjection) parts.push(task.categoryInjection)
+    if (task.extraInjection) parts.push(task.extraInjection)
+    const systemPrompt = parts.join('\n\n')
+    if (onScenarioStart) onScenarioStart(task.category, task.prompt_id)
+
+    const turns = []
+    let history = []
+
+    for (let t = 0; t < numTurns; t++) {
+      const userMessage = t === 0
+        ? task.firstPrompt
+        : await withRetryOnRateLimit(() => generateSeekerMessage(systemPrompt, history))
+      const assistantMessage = await withRetryOnRateLimit(() => sendResponseOnly(history, userMessage))
+      turns.push({ turnIndex: t, userMessage, assistantMessage })
+      history.push({ role: 'user', content: userMessage }, { role: 'assistant', content: assistantMessage })
+      if (onProgress) onProgress(task.category, task.prompt_id, t, numTurns, i + 1)
+    }
+
+    scenarios[key] = {
+      turns,
+      metadata: {
+        category: task.category,
+        prompt_id: task.prompt_id,
+        categoryInjection: task.categoryInjection || null,
+        extraInjection: task.extraInjection || null,
+        api_model: getApiProvider(),
+      }
+    }
+  }
+
+  return { scenarios }
+}
+
 export default {
+  setApiProvider,
+  getApiProvider,
   sendMessageToLLM,
   sendMessageWithInlineMentalModel,
+  sendMessageMentalModelOnly,
+  sendResponseOnly,
+  sendMessageSeparateMentalModelAndResponse,
+  loadConvoFromConvosToUse,
+  loadHumanDataJson,
+  runHumanDataAnalysis,
+  downloadHumanAnalysisAsZip,
+  backfillEmptyMentalModelsForHumanResult,
+  isEmptyMentalModel,
+  runGenerateConvos,
   inferUncertainAssumptions,
   inferMentalModel,
   inferMentalModelOld,
   generateSeekerMessage,
   run_simulations,
   downloadRunAsZip,
+  nextRunId,
 }

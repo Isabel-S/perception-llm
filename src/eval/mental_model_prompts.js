@@ -8,15 +8,10 @@ function buildHistoryBlock(historyStr) {
   return historyStr.trim() ? historyStr : '(no previous conversation)'
 }
 
-/**
- * Build full prompt for support / induct / structured / types_support.
- * historyStr: conversation so far (plain text).
- * newUserText: User A's current message.
- * modelType: 'support' | 'induct' | 'structured' | 'types_support'
- */
-export function buildPromptWithHistory(historyStr, newUserText, modelType) {
+/** Base prompt: conversation + User A now says (shared by single-call and separate-call flows). */
+export function buildBasePrompt(historyStr, newUserText) {
   const historyBlock = buildHistoryBlock(historyStr)
-  const base = `You are an AI assistant having a conversation with a human (User A).
+  return `You are an AI assistant having a conversation with a human (User A).
 
 Conversation so far:
 """${historyBlock}"""
@@ -24,9 +19,107 @@ Conversation so far:
 User A now says:
 """${newUserText}"""
 `
+}
+
+/**
+ * Build full prompt for support / induct / structured / types_support (single call: mental model + response).
+ * historyStr: conversation so far (plain text), used when priorTurnsWithPriors is null.
+ * newUserText: User A's current message.
+ * modelType: 'support' | 'induct' | 'structured' | 'types_support'
+ * priorTurnsWithPriors: optional array of { userMessage, assistantMessage, mentalModel? } so prior (scores only) is shown after each turn in the conversation log.
+ */
+export function buildPromptWithHistory(historyStr, newUserText, modelType, priorTurnsWithPriors = null) {
+  const usePriors = Array.isArray(priorTurnsWithPriors) && priorTurnsWithPriors.length > 0 && ['induct', 'types_support'].includes(modelType)
+  const base = usePriors
+    ? buildBasePromptWithPriors(priorTurnsWithPriors, newUserText)
+    : buildBasePrompt(historyStr, newUserText)
+  const updateLine = usePriors ? '\n\nUpdate your mental model for the current turn.\n\n' : ''
   const suffix = SUFFIX_BY_MODEL[modelType]
   if (!suffix) throw new Error(`Unknown mental model type: ${modelType}`)
-  return base + suffix
+  return base + updateLine + suffix
+}
+
+/** Mental-model-only suffix (no "write your reply / RESPONSE" part) for separate-call flow. */
+function getMentalModelOnlySuffix(modelType) {
+  const suffix = SUFFIX_BY_MODEL[modelType]
+  if (!suffix) throw new Error(`Unknown mental model type: ${modelType}`)
+  const idx = suffix.indexOf('Then, on a new line, write your actual reply')
+  if (idx >= 0) return suffix.slice(0, idx).trim()
+  return suffix.replace(/\n\nRESPONSE:\n?$/i, '').trim()
+}
+
+/**
+ * Format mental model for "prior" context: scores only, no explanations.
+ * Recursively removes "explanation" keys so the model sees only the previous turn's scores.
+ */
+export function formatPriorMentalModel(mentalModelObj) {
+  if (!mentalModelObj || typeof mentalModelObj !== 'object') return ''
+  const stripExplanations = (obj) => {
+    if (obj === null || typeof obj !== 'object') return obj
+    if (Array.isArray(obj)) return obj.map(stripExplanations)
+    const out = {}
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === 'explanation') continue
+      out[k] = stripExplanations(v)
+    }
+    return out
+  }
+  try {
+    return JSON.stringify(stripExplanations(mentalModelObj), null, 2)
+  } catch (_) {
+    return ''
+  }
+}
+
+/**
+ * Build conversation block with prior mental model (scores only) after each turn.
+ * turnsWithPriors: [ { userMessage, assistantMessage, mentalModel? }, ... ]
+ * Each turn is "User: ...\n\nAssistant: ..." then if mentalModel is present, "\n\nMental model at end of this turn (scores only):\n```json\n...\n```\n\n".
+ */
+export function buildHistoryBlockWithPriors(turnsWithPriors) {
+  if (!turnsWithPriors?.length) return '(no previous conversation)'
+  const parts = turnsWithPriors.map((t) => {
+    let block = `User: ${typeof t.userMessage === 'string' ? t.userMessage : ''}\n\nAssistant: ${typeof t.assistantMessage === 'string' ? t.assistantMessage : ''}`
+    if (t.mentalModel != null && typeof t.mentalModel === 'object') {
+      const priorJson = formatPriorMentalModel(t.mentalModel)
+      if (priorJson) block += `\n\nMental model at end of this turn (scores only):\n\`\`\`json\n${priorJson}\n\`\`\``
+    }
+    return block
+  })
+  return parts.join('\n\n')
+}
+
+/** Base prompt when using per-turn priors: conversation (with prior after each turn) + User A now says. */
+export function buildBasePromptWithPriors(turnsWithPriors, newUserText) {
+  const historyBlock = buildHistoryBlockWithPriors(turnsWithPriors)
+  return `You are an AI assistant having a conversation with a human (User A).
+
+Conversation so far:
+"""${historyBlock}"""
+
+User A now says:
+"""${newUserText}"""
+`
+}
+
+/** Build prompt that asks only for the mental model JSON (no response). Used in separate-call flow, call 1. */
+export function buildMentalModelOnlyPrompt(historyStr, newUserText, modelType, priorMentalModelOrTurnsWithPriors = null) {
+  const usePriors = Array.isArray(priorMentalModelOrTurnsWithPriors) && priorMentalModelOrTurnsWithPriors.length > 0 && ['induct', 'types_support'].includes(modelType)
+  const base = usePriors
+    ? buildBasePromptWithPriors(priorMentalModelOrTurnsWithPriors, newUserText)
+    : buildBasePrompt(historyStr, newUserText)
+  const updateLine = usePriors ? '\n\nUpdate your mental model for the current turn.\n\n' : '\n\n'
+  return base + updateLine + getMentalModelOnlySuffix(modelType)
+}
+
+/** Build prompt that asks only for the reply under RESPONSE:. Used in separate-call flow, call 2. */
+export function buildResponseOnlyPrompt(historyStr, newUserText) {
+  const base = buildBasePrompt(historyStr, newUserText)
+  return base + `
+Write your reply to User A under the heading:
+
+RESPONSE:
+`
 }
 
 const SUFFIX_SUPPORT = `First, output your mental model of User A. Estimate structured beliefs about the extent to which User A is seeking different types of support, following Cutrona (1992)'s taxonomy:
@@ -71,6 +164,9 @@ const SUFFIX_INDUCT = `First, output your mental model of User A. Estimate struc
 2. Belief about how right User A is in the situation.
 3. Belief about whether User A has more information than you (the model).
 4. Belief about whether User A is seeking an objective perspective.
+
+Treat these as *probabilistic beliefs* that may co-exist. These dimensions are independent and do NOT need to sum to 1. Each score should be between 0 and 1.
+
 Then output ONLY a valid JSON object in the following structure:
 
 {
@@ -250,6 +346,41 @@ export function parseSingleCallResponse(content) {
   }
 
   return { mentalModel: mentalModel || {}, response: responseText }
+}
+
+/** Parse content that is only a mental model JSON (no RESPONSE:). Used for separate-call flow, call 1. */
+export function parseMentalModelOnlyResponse(content) {
+  const raw = (content || '').trim()
+  const open = raw.indexOf('{')
+  if (open < 0) return {}
+  let depth = 0
+  let end = -1
+  for (let i = open; i < raw.length; i++) {
+    if (raw[i] === '{') depth++
+    else if (raw[i] === '}') {
+      depth--
+      if (depth === 0) {
+        end = i + 1
+        break
+      }
+    }
+  }
+  if (end <= open) return {}
+  try {
+    const str = stripJsonFences(raw.slice(open, end))
+    return JSON.parse(str) || {}
+  } catch (_) {
+    return {}
+  }
+}
+
+/** Extract reply text from content that has "RESPONSE:" heading. Used for separate-call flow, call 2. */
+export function parseResponseOnlyContent(content) {
+  const raw = (content || '').trim()
+  const responseMarker = /RESPONSE:\s*/i
+  const idx = raw.search(responseMarker)
+  if (idx < 0) return raw
+  return raw.slice(idx).replace(responseMarker, '').trim()
 }
 
 export const INLINE_MENTAL_MODEL_TYPES = ['support', 'induct', 'structured', 'types_support']
