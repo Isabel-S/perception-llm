@@ -85,5 +85,7 @@ function serveData() {
 }
 
 export default defineConfig({
+  // GitHub Pages: set VITE_BASE_URL=/<repo-name>/ in the deploy workflow
+  base: process.env.VITE_BASE_URL || '/',
   plugins: [react(), serveData()],
 })

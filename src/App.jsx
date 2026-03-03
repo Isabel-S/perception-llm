@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import ChatInterface from './components/ChatInterface'
 import VisualizationPanel from './components/VisualizationPanel'
 import ExploreConversations from './components/ExploreConversations'
-import { sendMessageToLLM, sendMessageWithInlineMentalModel, sendMessageSeparateMentalModelAndResponse, inferUncertainAssumptions, inferMentalModel, inferMentalModelOld, run_simulations, runHumanDataAnalysis, setApiProvider } from './services/api'
+import { sendMessageToLLM, sendMessageWithInlineMentalModel, sendMessageSeparateMentalModelAndResponse, inferUncertainAssumptions, inferMentalModel, inferMentalModelOld, run_simulations, runHumanDataAnalysis, setApiProvider, setAzureConfig } from './services/api'
 import { DEFAULT_SEEKER_PROMPT } from './eval/default_prompt.js'
 import './App.css'
 
@@ -41,9 +41,30 @@ function App() {
   const [humanDataUploadedFileName, setHumanDataUploadedFileName] = useState(null)
   const [apiProvider, setApiProviderState] = useState('gpt-4o')
 
+  const AZURE_STORAGE_KEY = 'perception_azure_config'
+  const [azureConfig, setAzureConfigState] = useState(() => {
+    try {
+      const raw = localStorage.getItem(AZURE_STORAGE_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        return { endpoint: parsed.endpoint ?? '', apiKey: parsed.apiKey ?? '' }
+      }
+    } catch (_) {}
+    return { endpoint: '', apiKey: '' }
+  })
+
   useEffect(() => {
     setApiProvider(apiProvider)
   }, [apiProvider])
+
+  useEffect(() => {
+    setAzureConfig(azureConfig)
+    try {
+      if (azureConfig.endpoint || azureConfig.apiKey) {
+        localStorage.setItem(AZURE_STORAGE_KEY, JSON.stringify(azureConfig))
+      }
+    } catch (_) {}
+  }, [azureConfig])
 
   const handleSendMessage = async (message) => {
     // Add user message
@@ -412,6 +433,38 @@ function App() {
               <option value="llama">Llama (Vertex)</option>
             </select>
           </label>
+          {apiProvider === 'gpt-4o' && (
+            <section className="control-section control-section-collapsible azure-credentials">
+              <details className="control-details">
+                <summary className="control-details-summary">Azure credentials</summary>
+                <div className="control-details-content">
+                  <p className="control-section-desc">Enter your Azure OpenAI endpoint and key (stored in this browser only). Uses gpt-4o deployment.</p>
+                  <label className="control-row">
+                    <span className="control-label">Endpoint</span>
+                    <input
+                      type="url"
+                      placeholder="https://your-resource.openai.azure.com/"
+                      value={azureConfig.endpoint}
+                      onChange={(e) => setAzureConfigState((c) => ({ ...c, endpoint: e.target.value }))}
+                      className="control-input control-input-wide"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="control-row">
+                    <span className="control-label">API key</span>
+                    <input
+                      type="password"
+                      placeholder="Your Azure API key"
+                      value={azureConfig.apiKey}
+                      onChange={(e) => setAzureConfigState((c) => ({ ...c, apiKey: e.target.value }))}
+                      className="control-input control-input-wide"
+                      autoComplete="off"
+                    />
+                  </label>
+                </div>
+              </details>
+            </section>
+          )}
           <label className="control-row control-row-checkbox">
             <input
               type="checkbox"

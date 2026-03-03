@@ -30,6 +30,48 @@ const AZURE_API_KEY = env.VITE_AZURE_API_KEY ?? ''
 const AZURE_DEPLOYMENT = env.VITE_AZURE_DEPLOYMENT ?? ''
 const AZURE_API_VERSION = env.VITE_AZURE_API_VERSION ?? ''
 
+const DEFAULT_AZURE_DEPLOYMENT = 'gpt-4o'
+const DEFAULT_AZURE_API_VERSION = '2024-12-01-preview'
+
+/** User-provided Azure config (e.g. from UI). Only endpoint and apiKey; deployment/version use defaults. */
+let userAzureConfig = { endpoint: '', apiKey: '' }
+
+export function setAzureConfig(config) {
+  if (!config) {
+    userAzureConfig = { endpoint: '', apiKey: '' }
+    return
+  }
+  userAzureConfig = {
+    endpoint: (config.endpoint ?? userAzureConfig.endpoint ?? '').trim(),
+    apiKey: (config.apiKey ?? userAzureConfig.apiKey ?? '').trim(),
+  }
+}
+
+export function getAzureConfig() {
+  return { ...userAzureConfig }
+}
+
+function getEffectiveAzureConfig() {
+  const u = userAzureConfig
+  const hasUser = u.endpoint && u.apiKey
+  if (hasUser) {
+    const endpoint = u.endpoint.endsWith('/') ? u.endpoint : u.endpoint + '/'
+    return {
+      endpoint,
+      apiKey: u.apiKey,
+      deployment: DEFAULT_AZURE_DEPLOYMENT,
+      apiVersion: DEFAULT_AZURE_API_VERSION,
+    }
+  }
+  const endpoint = (AZURE_ENDPOINT || '').endsWith('/') ? AZURE_ENDPOINT : (AZURE_ENDPOINT || '') + '/'
+  return {
+    endpoint,
+    apiKey: AZURE_API_KEY || '',
+    deployment: AZURE_DEPLOYMENT || DEFAULT_AZURE_DEPLOYMENT,
+    apiVersion: AZURE_API_VERSION || DEFAULT_AZURE_API_VERSION,
+  }
+}
+
 const GEMINI_API_KEY = env.VITE_GEMINI_API_KEY ?? ''
 const GEMINI_MODEL = env.VITE_GEMINI_MODEL || 'gemini-1.5-flash'
 const GEMINI_PROJECT_ID = env.VITE_GEMINI_PROJECT_ID || env.GEMINI_PROJECT_ID || ''
@@ -62,9 +104,10 @@ export function getApiProvider() {
 }
 
 function requireAzureEnv() {
-  if (!AZURE_ENDPOINT || !AZURE_API_KEY || !AZURE_DEPLOYMENT || !AZURE_API_VERSION) {
+  const c = getEffectiveAzureConfig()
+  if (!c.endpoint || !c.apiKey) {
     throw new Error(
-      `Azure OpenAI config missing. Set in .env: VITE_AZURE_ENDPOINT, VITE_AZURE_API_KEY, VITE_AZURE_DEPLOYMENT, VITE_AZURE_API_VERSION`
+      'Azure OpenAI config missing. Enter your Azure endpoint and API key in the "Azure credentials" section below (or set VITE_AZURE_ENDPOINT and VITE_AZURE_API_KEY in .env for local dev).'
     )
   }
 }
@@ -742,16 +785,17 @@ async function chatCompletion(messages) {
 
 async function chatCompletionAzure(messages) {
   requireAzureEnv()
-  const apiUrl = `${AZURE_ENDPOINT}openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=${AZURE_API_VERSION}`
+  const c = getEffectiveAzureConfig()
+  const apiUrl = `${c.endpoint}openai/deployments/${c.deployment}/chat/completions?api-version=${c.apiVersion}`
   const response = await fetchWithTimeout(apiUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'api-key': AZURE_API_KEY },
+    headers: { 'Content-Type': 'application/json', 'api-key': c.apiKey },
     body: JSON.stringify({
       messages,
       max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
       temperature: DEFAULT_TEMPERATURE,
       top_p: DEFAULT_TOP_P,
-      model: AZURE_DEPLOYMENT,
+      model: c.deployment,
     }),
   })
   if (!response.ok) {
