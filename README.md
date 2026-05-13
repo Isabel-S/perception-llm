@@ -2,12 +2,28 @@
 
 A local web application with a chat interface for interacting with an LLM and a visualization panel that displays insights based on the responses.
 
+## Screenshots
+
+**Run conversations** — after a few turns of a simulated eval, the right panel shows live mental-model scores and a chart of how they evolve:
+
+![Run conversations tab with mental model](screenshots/run_conversations_eval.png)
+
+**Explore conversations** — browse saved Spiral-Bench eval runs turn by turn with the mental model JSON per turn:
+
+![Explore chatlog view](screenshots/explore_chatlog.png)
+
+**Chart view** — average mental-model scores across 20 turns per scenario category; this run shows a clear upward trend in `validation_seeking` and `user_rightness`:
+
+![Explore chart view with trend](screenshots/explore_chart_trend.png)
+
 ## Features
 
 - 💬 Chat interface for LLM conversations
-- 📊 Visualization panel for response analysis
-- 🎨 Modern, dark-themed UI
-- 🔌 Ready for Azure OpenAI API integration
+- 📊 Visualization panel with live mental-model scores and per-turn chart
+- 🧠 Multiple mental model types: Induct, Support, Structured, Person Perception
+- 🔁 Simulated eval runner (Spiral-Bench, 30 scenarios × 20 turns)
+- 📂 Explore saved runs: chatlog and chart views
+- 🔌 Azure OpenAI (GPT-4o), Google Gemini, and Llama (Vertex AI) support
 
 ## Setup
 
@@ -103,23 +119,32 @@ If you used a seed, add it (e.g. `--seed 42`). The run ID is the folder name und
 ```
 ├── src/
 │   ├── components/
-│   │   ├── ChatInterface.jsx      # Chat UI component
-│   │   ├── ChatInterface.css
-│   │   ├── VisualizationPanel.jsx # Visualization component
-│   │   └── VisualizationPanel.css
+│   │   ├── ChatInterface.jsx           # Chat UI
+│   │   ├── ExploreConversations.jsx    # Browse saved eval runs (chatlog + chart)
+│   │   └── VisualizationPanel.jsx      # Mental model scores + per-turn chart
+│   ├── eval/
+│   │   ├── categories.js              # Spiral-Bench category injections
+│   │   ├── default_prompt.js          # Seeker LLM system prompt
+│   │   ├── injections.js              # Per-scenario extra injections
+│   │   ├── mental_model_prompts.js    # Prompt builders + response parsers
+│   │   └── scenarios.js              # Spiral-Bench scenario list
 │   ├── services/
-│   │   └── api.js                 # API service (ready for Azure)
-│   ├── App.jsx                     # Main app component
-│   ├── App.css
-│   ├── main.jsx                    # Entry point
-│   └── index.css                   # Global styles
+│   │   └── api.js                     # LLM API calls (Azure, Gemini, Llama)
+│   ├── App.jsx                        # Root component + eval orchestration
+│   └── main.jsx                       # Entry point
+├── scripts/
+│   ├── run_eval.js                    # CLI eval runner (npm run run_eval)
+│   └── generate-spiral-manifest.js   # Rebuild public data manifest
+├── data/                              # Saved eval run JSONs (gitignored)
+├── screenshots/                       # README screenshots
 ├── index.html
 ├── package.json
-└── vite.config.js
+└── vite.config.js                     # Dev server + data middleware + build plugin
 ```
 
 ## Customization
 
-- **Visualization Panel**: Customize `VisualizationPanel.jsx` to visualize specific data from LLM responses (sentiment, keywords, topics, etc.)
-- **Styling**: Modify the CSS files to match your preferred design
-- **API Integration**: Replace the mock API in `src/services/api.js` with your Azure OpenAI implementation
+- **Mental model types**: Add or modify prompts and parsers in `src/eval/mental_model_prompts.js`
+- **Visualization Panel**: Edit `VisualizationPanel.jsx` to add new score series or chart types
+- **Eval scenarios**: Swap in different scenarios via `src/eval/scenarios.js` and `src/eval/categories.js`
+- **API providers**: Add new LLM backends in `src/services/api.js`
