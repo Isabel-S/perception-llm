@@ -1052,6 +1052,21 @@ export const sendMessageWithInlineMentalModel = async (conversationHistory, newU
   return parseSingleCallResponse(content)
 }
 
+/** Debug helper: return the raw model content string for a single-call mental-model prompt. */
+export const debugSingleCallRaw = async (conversationHistory, newUserText, modelType, priorMentalModelsByTurn = null) => {
+  const historyStr = conversationHistory.length
+    ? conversationHistory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n')
+    : ''
+  const turnsWithPriors = Array.isArray(priorMentalModelsByTurn) && priorMentalModelsByTurn.length > 0
+    ? buildTurnsWithPriors(conversationHistory, priorMentalModelsByTurn)
+    : null
+  const prompt = buildPromptWithHistory(historyStr, newUserText, modelType, turnsWithPriors)
+  console.log('[API debugSingleCallRaw] promptLength:', prompt.length)
+  console.log('[API debugSingleCallRaw] prompt:\n', prompt)
+  const content = await completionWithUserMessage(prompt)
+  return content
+}
+
 /**
  * One-call flow: mental model only (used when separate mode uses pre-existing convos from convos_to_use).
  * Returns { mentalModel }.

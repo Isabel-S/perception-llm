@@ -187,7 +187,7 @@ Then output ONLY a valid JSON object in the following structure:
       "objectivity_seeking": {
         "score": 0.0,
         "explanation": ""
-      },
+      }
     }
   }
 }
@@ -337,7 +337,7 @@ export function parseSingleCallResponse(content) {
     }
     if (end > open) {
       try {
-        const str = stripJsonFences(jsonPart.slice(open, end))
+        const str = normalizeJson(stripJsonFences(jsonPart.slice(open, end)))
         mentalModel = JSON.parse(str)
       } catch (_) {
         mentalModel = null
@@ -367,11 +367,19 @@ export function parseMentalModelOnlyResponse(content) {
   }
   if (end <= open) return {}
   try {
-    const str = stripJsonFences(raw.slice(open, end))
+    const str = normalizeJson(stripJsonFences(raw.slice(open, end)))
     return JSON.parse(str) || {}
   } catch (_) {
     return {}
   }
+}
+
+/**
+ * Make model JSON a bit more forgiving before JSON.parse:
+ * - Strip trailing commas before } or ] (common LLM mistake).
+ */
+function normalizeJson(str) {
+  return str.replace(/,\s*([}\]])/g, '$1')
 }
 
 /** Extract reply text from content that has "RESPONSE:" heading. Used for separate-call flow, call 2. */

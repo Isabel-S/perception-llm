@@ -10,8 +10,8 @@
  *   npm run run_eval -- --backfill_empty --model_induct --file do_not_upload/h05-1/h05-1_induct_run_1.json
  *
  * Resume a single_call run (e.g. after content filter or crash):
- *   npm run run_eval -- --single_call --model_induct --resume_run run_gpt-4o_1 --api_gpt-4o --seed 21
- *   (Use the same --api_* and --seed as the original run.)
+ *   npm run run_eval -- --single_call --model_induct --resume_run run_gpt-4o_1_seed_21 --api_gpt-4o --seed 21
+ *   (Use the same --api_* and --seed as the original run. The seed is encoded in the folder name as _seed_<N>.)
  *
  * API model (optional):
  *   --api_gemini     Use Google Gemini for completion
@@ -19,8 +19,8 @@
  *   --api_llama      Use Llama via Vertex AI (Node only; set GOOGLE_APPLICATION_CREDENTIALS, LLAMA_PROJECT_ID)
  *
  * Saves to data/:
- *   single_call: data/single_call/<model>/run_<api_model>_<#>/ (categories inside)
- *   separate_call: data/separate_call/convo_#/<model>/run_<api_model>_<#>/ (categories inside)
+ *   single_call: data/single_call/<model>/run_<api_model>_<#>[_prior][_seed_<seed>]/ (categories inside)
+ *   separate_call: data/separate_call/convo_#/<model>/run_<api_model>_<#>[_prior][_seed_<seed>]/ (categories inside)
  *   generate_convo: data/separate_call/convo_#/ (categories inside)
  *   human_data: data/do_not_upload/<filename_no_ext>/<filename_no_ext>_<api_model>_<mental_model_type>.json
  *   backfill_empty: overwrites the given --file with mental models filled in for turns that had empty mentalModel.
@@ -56,6 +56,11 @@ function parseArgs() {
     else if (args[i] === '--filename' && args[i + 1]) { flags.filename = args[i + 1]; i++ }
     else if (args[i] === '--backfill_empty') flags.backfill_empty = true
     else if (args[i] === '--file' && args[i + 1]) { flags.file = args[i + 1]; i++ }
+    else if (args[i] === '--chat_index' && args[i + 1]) {
+      const n = parseInt(args[i + 1], 10)
+      if (!Number.isNaN(n)) flags.chat_index = n
+      i++
+    }
     else if (args[i] === '--api_gemini') flags.api_provider = 'gemini'
     else if (args[i] === '--api_gpt-4o' || args[i] === '--api_gpt4o') flags.api_provider = 'gpt-4o'
     else if (args[i] === '--api_llama') flags.api_provider = 'llama'
@@ -70,6 +75,127 @@ function parseArgs() {
   return flags
 }
 
+/**
+ * Extract a single conversation by index from a multi-conversation JSON.
+ * Supports:
+ *  - { messages: [...] }                       -> treated as single convo (chatIndex must be 0)
+ *  - { chats: [ { messages: [...] }, ... ] }  -> pick chats[chatIndex]
+ *  - [ { messages: [...] }, ... ]             -> pick array[chatIndex]
+ *  - [ ChatGPT export objects with mapping/... ] -> pick array[chatIndex] and
+ *    linearize its mapping graph into messages.
+ *
+ * Returns { meta?, messages } suitable for runHumanDataAnalysis rawData.
+ */
+function extractChatByIndex(raw, chatIndex) {
+  if (!Number.isInteger(chatIndex) || chatIndex < 0) {
+    throw new Error(`Invalid chat_index ${chatIndex}; expected non-negative integer`)
+  }
+
+  // Already in the expected single-convo shape
+  if (raw && Array.isArray(raw.messages)) {
+    if (chatIndex !== 0) {
+      throw new Error(
+        `JSON at --filename has a top-level messages array (single conversation); expected chat_index 0, got ${chatIndex}`
+      )
+    }
+    return raw
+  }
+
+  // { chats: [ { messages }, ... ] }
+  if (raw && Array.isArray(raw.chats)) {
+    const convo = raw.chats[chatIndex]
+    if (!convo) {
+      throw new Error(`chat_index ${chatIndex} out of range for chats.length=${raw.chats.length}`)
+    }
+    if (!Array.isArray(convo.messages)) {
+      throw new Error(`Expected chats[${chatIndex}].messages to be an array`)
+    }
+    const meta = { ...(raw.meta || {}), chat_index: chatIndex }
+    return { meta, messages: convo.messages }
+  }
+
+  // [ { messages }, ... ]
+  if (Array.isArray(raw) && raw.length && Array.isArray(raw[0]?.messages)) {
+    const convo = raw[chatIndex]
+    if (!convo) {
+      throw new Error(`chat_index ${chatIndex} out of range for array.length=${raw.length}`)
+    }
+    if (!Array.isArray(convo.messages)) {
+      throw new Error(`Expected array[${chatIndex}].messages to be an array`)
+    }
+    const meta = { chat_index: chatIndex }
+    return { meta, messages: convo.messages }
+  }
+
+  // ChatGPT export array: [ { title, mapping, current_node, ... }, ... ]
+  if (Array.isArray(raw) && raw.length && raw[0]?.mapping && raw[0]?.current_node !== undefined) {
+    const convo = raw[chatIndex]
+    if (!convo) {
+      throw new Error(`chat_index ${chatIndex} out of range for ChatGPT export array (len=${raw.length})`)
+    }
+    const messages = linearizeChatGptConversation(convo)
+    const meta = {
+      title: convo.title,
+      chat_index: chatIndex,
+      conversation_id: convo.conversation_id,
+      create_time: convo.create_time,
+      update_time: convo.update_time,
+    }
+    return { meta, messages }
+  }
+
+  throw new Error(
+    'Unsupported JSON shape for --chat_index. Expected one of: { messages: [...] }, { chats: [...] }, [ { messages: [...] }, ... ], or a ChatGPT export array.'
+  )
+}
+
+/**
+ * Linearize a single ChatGPT export conversation object (with mapping/current_node)
+ * into a flat [{ role, content }, ...] message list.
+ *
+ * For robustness (and to avoid re-implementing all of ChatGPT's branching logic),
+ * we:
+ *  - iterate over all mapping nodes,
+ *  - keep only visible user/assistant messages,
+ *  - sort them by create_time,
+ *  - and extract concatenated text from content.parts.
+ */
+function linearizeChatGptConversation(conv) {
+  const mapping = conv?.mapping || {}
+  if (!mapping || typeof mapping !== 'object') return []
+
+  const items = []
+  for (const node of Object.values(mapping)) {
+    if (!node || !node.message) continue
+    const msg = node.message
+    const role = msg.author?.role
+    if (role !== 'user' && role !== 'assistant') continue
+    const meta = msg.metadata || {}
+    if (meta && meta.is_visually_hidden) continue
+    const content = msg.content
+    if (!content) continue
+    const ctype = content.content_type
+    if (!['text', 'multimodal_text', 'code'].includes(ctype)) continue
+    const parts = content.parts
+    if (!Array.isArray(parts) || parts.length === 0) continue
+    let text = ''
+    const lines = []
+    for (const part of parts) {
+      if (typeof part === 'string') {
+        if (part) lines.push(part)
+      } else if (part && typeof part.text === 'string') {
+        if (part.text) lines.push(part.text)
+      }
+    }
+    text = lines.join('\n').trim()
+    if (!text) continue
+    const t = typeof msg.create_time === 'number' ? msg.create_time : 0
+    items.push({ role, content: text, t })
+  }
+
+  items.sort((a, b) => a.t - b.t)
+  return items.map(({ role, content }) => ({ role, content }))
+}
 function getNextRunNumber(baseDir) {
   if (!existsSync(baseDir)) return 1
   const entries = readdirSync(baseDir, { withFileTypes: true })
@@ -239,7 +365,8 @@ async function main() {
     } else {
       const runNum = getNextRunNumberForApi(basePath, apiProvider)
       const priorSuffix = flags.use_prior ? '_prior' : ''
-      runId = `run_${apiProvider}_${runNum}${priorSuffix}`
+      const seedSuffix = flags.seed != null ? `_seed_${flags.seed}` : ''
+      runId = `run_${apiProvider}_${runNum}${priorSuffix}${seedSuffix}`
     }
     log(`Single call, model=${model}, api=${apiProvider}, runId=${runId}, 30 scenarios × ${numTurns} turns${flags.seed != null ? `, seed=${flags.seed}` : ''}${flags.use_prior ? ', prior=on' : ''}${existingRun ? ', resuming' : ''}`)
     const result = await api.run_simulations({
@@ -277,7 +404,8 @@ async function main() {
     const basePath = join(DATA_ROOT, 'separate_call', convoFolder, model)
     const runNum = getNextRunNumberForApi(basePath, apiProvider)
     const priorSuffix = flags.use_prior ? '_prior' : ''
-    const runId = `run_${apiProvider}_${runNum}${priorSuffix}`
+    const seedSuffix = flags.seed != null ? `_seed_${flags.seed}` : ''
+    const runId = `run_${apiProvider}_${runNum}${priorSuffix}${seedSuffix}`
     log(`Separate call, convo=${convoFolder}, model=${model}, api=${apiProvider}, runId=${runId}${flags.seed != null ? `, seed=${flags.seed}` : ''}${flags.use_prior ? ', prior=on' : ''}`)
     const getConvo = (category, promptId) => {
       const p = join(convoPath, category, `${promptId}.json`)
@@ -332,9 +460,16 @@ async function main() {
     const dataPath = flags.filename
     const pathParts = dataPath.replace(/\.json$/i, '').split('/')
     const filenameNoExt = pathParts[pathParts.length - 1]
-    const humanDir = join(DATA_ROOT, 'do_not_upload', filenameNoExt)
+    // When a specific chat_index is requested, encode it into the folder and run id
+    // so results for different chats in the same file do not collide.
+    const chatSuffix =
+      typeof flags.chat_index === 'number' && Number.isInteger(flags.chat_index) && flags.chat_index >= 0
+        ? `_chat${flags.chat_index}`
+        : ''
+    const sourceIdBase = `${filenameNoExt}${chatSuffix}`
+    const humanDir = join(DATA_ROOT, 'do_not_upload', sourceIdBase)
     const priorSuffix = flags.use_prior ? '_prior' : ''
-    const outputFileName = `${filenameNoExt}_${apiProvider}_${model}${priorSuffix}.json`
+    const outputFileName = `${sourceIdBase}_${apiProvider}_${model}${priorSuffix}.json`
     const outputPath = join(humanDir, outputFileName)
 
     let existingResult = null
@@ -350,19 +485,38 @@ async function main() {
         log(`Could not load checkpoint ${outputPath}: ${e.message}. Starting fresh.`)
       }
     }
-    const runId = `${filenameNoExt}_${apiProvider}_${model}${priorSuffix}`
+    const runId = `${sourceIdBase}_${apiProvider}_${model}${priorSuffix}`
     const inputPath = join(DATA_ROOT, dataPath)
     if (!existsSync(inputPath)) {
       console.error(`File not found: ${inputPath}`)
       process.exit(1)
     }
-    const rawData = JSON.parse(readFileSync(inputPath, 'utf8'))
+    let rawData = JSON.parse(readFileSync(inputPath, 'utf8'))
+    if (typeof flags.chat_index === 'number') {
+      try {
+        rawData = extractChatByIndex(rawData, flags.chat_index)
+      } catch (e) {
+        console.error(`Failed to extract chat_index ${flags.chat_index} from ${dataPath}: ${e.message}`)
+        process.exit(1)
+      }
+    }
     if (!rawData?.messages?.length) {
-      console.error('JSON must have a messages array')
+      console.error('JSON must have a messages array (after any --chat_index extraction)')
       process.exit(1)
     }
-    if (!existingResult) log(`Human data: ${dataPath}, model=${model}, api=${apiProvider}, output=${outputFileName} (new run)`)
-    else log(`Human data: ${dataPath}, model=${model}, api=${apiProvider}, output=${outputFileName}`)
+    if (!existingResult) {
+      log(
+        `Human data: ${dataPath}${
+          chatSuffix ? ` (chat_index=${flags.chat_index})` : ''
+        }, model=${model}, api=${apiProvider}, output=${outputFileName} (new run)`
+      )
+    } else {
+      log(
+        `Human data: ${dataPath}${
+          chatSuffix ? ` (chat_index=${flags.chat_index})` : ''
+        }, model=${model}, api=${apiProvider}, output=${outputFileName}`
+      )
+    }
     mkdirSync(humanDir, { recursive: true })
     const result = await api.runHumanDataAnalysis({
       dataPath,
@@ -373,12 +527,20 @@ async function main() {
       existingResult,
       downloadWhenDone: false,
       onSaveCheckpoint: (res) => {
-        writeFileSync(outputPath, JSON.stringify({ meta: res.meta, turns: res.turns }, null, 2))
+        const metaWithChat =
+          typeof flags.chat_index === 'number'
+            ? { ...res.meta, chat_index: flags.chat_index }
+            : res.meta
+        writeFileSync(outputPath, JSON.stringify({ meta: metaWithChat, turns: res.turns }, null, 2))
         log(`  Saved checkpoint up to turn ${res.meta.turns_recorded_up_to + 1}`)
       },
       onProgress: (runId, sourceId, t, total) => log(`  turn ${t + 1}/${total}`),
     })
-    writeFileSync(outputPath, JSON.stringify({ meta: result.meta, turns: result.turns }, null, 2))
+    const finalMeta =
+      typeof flags.chat_index === 'number'
+        ? { ...result.meta, chat_index: flags.chat_index }
+        : result.meta
+    writeFileSync(outputPath, JSON.stringify({ meta: finalMeta, turns: result.turns }, null, 2))
     log(`Done. Wrote ${outputPath}`)
     return
   }

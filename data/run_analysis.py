@@ -624,35 +624,44 @@ def run_human(
 
     if models:
         pairs = [(p, m) for p, m in pairs if m in models]
-    by_model: dict[str, list[Path]] = {}
-    for path, model in pairs:
-        by_model.setdefault(model, []).append(path)
-    if not by_model:
-        print("[WARN] No human JSON files to plot (none found or none matched --human_files/--model).")
-        return
-
     csv_dir_base = out_root / "csvs" / "human"
     plot_dir = out_root / "plots" / "human"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    for model, paths in by_model.items():
+    if not pairs:
+        print("[WARN] No human JSON files to plot (none found or none matched --human_files/--model).")
+        return
+
+    # Plot each human JSON independently so outputs are per-file
+    for path, model in pairs:
         cfg = DATASET_CONFIG.get(model)
         if not cfg:
             continue
         score_cols = cfg["score_cols"]
         score_group_key = cfg["score_group_key"]
-        all_rows = []
-        for p in paths:
-            try:
-                all_rows.extend(load_human_doc(p, score_group_key, score_cols))
-            except Exception as e:
-                print(f"[WARN] {p}: {e}")
-        if not all_rows:
+        try:
+            rows = load_human_doc(path, score_group_key, score_cols)
+        except Exception as e:
+            print(f"[WARN] {path}: {e}")
             continue
-        df = pd.DataFrame(all_rows)
+        if not rows:
+            continue
+        df = pd.DataFrame(rows)
         df = ensure_numeric(df, score_cols)
-        # Name outputs after the file(s): e.g. h01_gemini_induct, or h01_gemini_induct_and_h05_1_gemini_induct
-        slug = human_files_slug(paths)
+        # Name outputs so they reflect the folder (e.g. hl08_chat102) and the
+        # specific API/model run (from the filename), without redundant prefixes.
+        parent = path.parent.name
+        stem = path.stem
+        if parent not in {"do_not_upload", "human", ""}:
+            # If filename already starts with the folder name (e.g.
+            # hl07_chat361/hl07_chat361_gemini_types_support.json),
+            # just use the stem. Otherwise prepend the folder.
+            if stem.startswith(parent + "_"):
+                slug = stem
+            else:
+                slug = f"{parent}_{stem}"
+        else:
+            slug = stem
         csv_dir = csv_dir_base / slug
         save_csv(df, csv_dir / "scores_per_turn_per_convo.csv")
         # Aggregate over convos: mean/sem per turn per signal
